@@ -330,9 +330,28 @@ var (
 var doltIgnorePatterns = []string{
 	// Table-rebuild intermediates: the ignored series stages every rebuild
 	// through a __temp__<table> that is renamed to the final (ignored) name.
-	// Like the journal tables below, __temp__ names never exist on the
-	// versioned plane, so the pattern is safe unconditionally — and it must
-	// be asserted before the ignored series runs: on a
+	// Unlike the journal tables below, a __temp__ name CAN reach the
+	// versioned plane — that is the incident this pattern fixes, and
+	// ignored_cursor_untrack.go's scratch can still be sitting at HEAD on a
+	// lineage whose repair window a blanket commit caught before this
+	// shipped. What holds instead is the weaker invariant
+	// versionGatedDoltIgnorePatterns actually needs: no __temp__ table is
+	// one whose COMMITTED lineage is ever read back, so suppressing its
+	// staging can strand no data. Every creator disposes of its own
+	// intermediate within the pass that made it — by renaming onto an
+	// already-ignored final name (ignored/0001, 0002, 0012, 0022; main
+	// 0055, 0064), by dropping it outright (main 0062's __temp__events_flip,
+	// the one main-plane intermediate that is never renamed), or, for the
+	// untrack scratch, by a sweep that forces past this very pattern
+	// (dropIgnoredCursorScratch). A new __temp__ producer owes the same.
+	// So the pattern needs no version gate, but it prevents residue rather
+	// than repairing it: where an older binary already committed some other
+	// __temp__X at HEAD, the pattern keeps that table's drop or rename delta
+	// out of every ignore-filtered staging candidate set (dirtyTables with
+	// excludeIgnored, existingCommittableTables), so no migration commit
+	// stages it, and dolt pull refuses the uncommitted non-add delta until
+	// the store is repaired by hand. And it must be asserted before the
+	// ignored series runs: on a
 	// @@dolt_transaction_commit=1 server an unignored CREATE __temp__X
 	// auto-commits a real table at HEAD, and the rename to the ignored final
 	// name then leaves an unstageable "__temp__X -> X" rename half in
