@@ -3,6 +3,7 @@ package externaldeps
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -906,16 +907,45 @@ func (u *issueUseCase) issueClosed(ctx context.Context, id string) (bool, error)
 	return closedInUOW(ctx, u.IssueUseCase, id)
 }
 
+// missingAtSeam reports whether err is one of the shapes a storage seam uses to
+// say "no such row".
+//
+// The seams disagree, so the test is a disjunction rather than the
+// storage.ErrNotFound check the store arm's siblings use: this decorator sits
+// on the DOMAIN seam, where db.issueSQLRepositoryImpl.Get returns sql.ErrNoRows
+// unchanged and issueUseCaseImpl.get wraps it with the id. Testing only for
+// storage.ErrNotFound here would classify an ordinary miss as a hard error and
+// lose the wisp fallback entirely. internal/workapi.isNotFound answers the same
+// question for the same reason; it stays unexported there deliberately, so the
+// policy layer carries its own copy rather than widening that package's surface.
+func missingAtSeam(err error) bool {
+	return errors.Is(err, storage.ErrNotFound) || errors.Is(err, sql.ErrNoRows)
+}
+
 func closedInUOW(ctx context.Context, issues domain.IssueUseCase, id string) (bool, error) {
 	issue, err := issues.GetIssue(ctx, id)
-	if err != nil || issue == nil {
-		// A miss on the issues plane is not an answer: the id may be a wisp.
-		if wisp, werr := issues.GetWisp(ctx, id); werr == nil && wisp != nil {
-			return wisp.Status == types.StatusClosed, nil
-		}
-		return false, nil
+	if err == nil && issue != nil {
+		return issue.Status == types.StatusClosed, nil
 	}
-	return issue.Status == types.StatusClosed, nil
+	if err != nil && !missingAtSeam(err) {
+		// A transient DB or transaction failure is not "no such issue". Swallowing
+		// it here would hand the caller a false "not closed", which the
+		// blockers-non-empty path reports as ErrCloseBlocked — a permanent-looking
+		// refusal whose remedy advice is --force, for what was an infrastructure
+		// blip. pinReClose and the store arm's issueClosed both propagate; this is
+		// the third implementation of one exemption and it answers the same way.
+		return false, err
+	}
+	// A miss on the issues plane is not an answer: the id may be a wisp.
+	wisp, werr := issues.GetWisp(ctx, id)
+	if werr == nil && wisp != nil {
+		return wisp.Status == types.StatusClosed, nil
+	}
+	if werr != nil && !missingAtSeam(werr) {
+		return false, werr
+	}
+	// On neither plane: not closed, and not an error.
+	return false, nil
 }
 
 type dependencyUseCase struct {

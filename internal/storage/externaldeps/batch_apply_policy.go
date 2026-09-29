@@ -183,6 +183,13 @@ func (a *policyBatchApplier) ownEdges(ctx context.Context, closing []batchClosin
 // closed when the item runs.
 func (a *policyBatchApplier) pinReClose(ctx context.Context, items []issueops.ApplyItem, item batchClosingItem, blockers []string) error {
 	refused := closingItemError(item, externallyBlocked(item.target.ID, blockers))
+	if a.current == nil {
+		// Neither arm was wired: no read can answer the exemption, so refuse
+		// plainly rather than dereferencing a nil read inside a write path. This
+		// is policyBatchCloser's default: arm, which degrades the same way for
+		// the same mis-wiring. Unreachable from either construction site today.
+		return refused
+	}
 	current, err := a.current(ctx, item.target.ID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err

@@ -42,6 +42,7 @@ go_test(
         "uow_decorator_test.go",
         "uow_policy_roles_test.go",
         "uow_preresolve_test.go",
+        "uow_reclose_exemption_test.go",
     ],
     embed = [":externaldeps"],
     deps = [

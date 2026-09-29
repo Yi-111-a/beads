@@ -74,7 +74,7 @@ func TestContinueNeverSuggestsClaimingAnExternallyHeldStep(t *testing.T) {
 			t.Errorf("tried %v, want every ready step", c.tried)
 		}
 		out := captureStdout(t, func() error {
-			PrintContinueResult(&ContinueResult{MoleculeID: "mx", NextStep: next, heldSteps: held})
+			PrintContinueResult(&ContinueResult{MoleculeID: "mx", NextStep: next, HeldSteps: held})
 			return nil
 		})
 		if strings.Contains(out, "--claim") {
@@ -138,7 +138,7 @@ func TestContinueNoAutoNeverSuggestsAnExternallyHeldStep(t *testing.T) {
 			t.Fatalf("next=%s, want none when the guard refuses every step", stepIDOf(next))
 		}
 		out := captureStdout(t, func() error {
-			PrintContinueResult(&ContinueResult{MoleculeID: "mx", NextStep: next, heldSteps: held})
+			PrintContinueResult(&ContinueResult{MoleculeID: "mx", NextStep: next, HeldSteps: held})
 			return nil
 		})
 		if strings.Contains(out, "--claim") || !strings.Contains(out, "No claimable steps") || !strings.Contains(out, "mx-1, mx-2, mx-3") {

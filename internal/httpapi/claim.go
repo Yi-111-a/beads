@@ -343,6 +343,7 @@ var (
 	_ uow.BlockingAnnotatorSource   = timedProvider{}
 	_ uow.TreeWalkerSource          = timedProvider{}
 	_ uow.ReadyCounterSource        = timedProvider{}
+	_ uow.ReadyListerSource         = timedProvider{}
 	_ uow.CounterSource             = timedProvider{}
 	_ uow.QuerierSource             = timedProvider{}
 	_ uow.SweeperSource             = timedProvider{}
@@ -488,6 +489,12 @@ func (p timedProvider) TreeWalker() (issueops.TreeWalker, error) {
 // and with the same hazard as IssueReader.
 func (p timedProvider) ReadyCounter() (issueops.ReadyCounter, error) {
 	return uow.NewReadyCounter(p)
+}
+
+// ReadyLister builds the ready lister OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueReader.
+func (p timedProvider) ReadyLister() (issueops.ReadyLister, error) {
+	return uow.NewReadyLister(p)
 }
 
 // Counter builds the issue counter OVER THIS WRAPPER, for ReadyCounter's reason.

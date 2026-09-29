@@ -588,10 +588,16 @@ type ContinueResult struct {
 	MolComplete  bool         `json:"molecule_complete"`
 	MoleculeID   string       `json:"molecule_id,omitempty"`
 
-	// heldSteps are the ready steps the auto-claim skipped because an
+	// HeldSteps are the ready steps the auto-claim skipped because an
 	// unsatisfied `external:` dependency holds them (ErrClaimBlocked). When
 	// every ready step is held there is no step to suggest claiming.
-	heldSteps []string
+	//
+	// It is on the wire because the proxied --json route marshals this struct:
+	// without it an agent reading `next_step: null, auto_advanced: false` cannot
+	// tell "no ready steps exist" from "ready steps exist but are all held",
+	// which is the distinction the text route now draws. omitempty keeps every
+	// other outcome's envelope byte-identical.
+	HeldSteps []string `json:"held_steps,omitempty"`
 }
 
 // AdvanceToNextStep finds the next ready step in a molecule after closing a step.
@@ -650,9 +656,9 @@ func AdvanceToNextStep(ctx context.Context, s molWriter, closedStepID string, au
 	}
 
 	if autoClaim {
-		result.NextStep, result.AutoAdvanced, result.heldSteps = claimNextReadyStep(ctx, s, readySteps, actorName)
+		result.NextStep, result.AutoAdvanced, result.HeldSteps = claimNextReadyStep(ctx, s, readySteps, actorName)
 	} else {
-		result.NextStep, result.heldSteps = suggestNextReadyStep(ctx, s, readySteps)
+		result.NextStep, result.HeldSteps = suggestNextReadyStep(ctx, s, readySteps)
 	}
 
 	return result, nil
@@ -729,8 +735,8 @@ func PrintContinueResult(result *ContinueResult) {
 	}
 
 	if result.NextStep == nil {
-		if len(result.heldSteps) > 0 {
-			fmt.Printf("\nNo claimable steps in molecule: every ready step (%s) is held by an unsatisfied external dependency.\n", strings.Join(result.heldSteps, ", "))
+		if len(result.HeldSteps) > 0 {
+			fmt.Printf("\nNo claimable steps in molecule: every ready step (%s) is held by an unsatisfied external dependency.\n", strings.Join(result.HeldSteps, ", "))
 			return
 		}
 		fmt.Println("\nNo ready steps in molecule (may be blocked).")
