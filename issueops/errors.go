@@ -139,13 +139,18 @@ func (b Blocker) String() string {
 // reports — the spelling Blocker.String writes — back into its typed form. It
 // exists for producers that hold only that string contract; a producer with the
 // edges in hand builds Blocker values directly. A bare local id is a `blocks`
-// edge, and a bare `external:` reference keeps an unreported type.
+// edge, and an `external:` reference keeps an unreported type.
+//
+// The `external:` test comes first because a capability may itself end in a
+// parenthesized suffix: `external:remote:pay (beta)` is a legal reference, and
+// splitting it would report a truncated ID and a type the external guard never
+// names.
 func ParseBlocker(s string) Blocker {
-	if i := strings.LastIndex(s, " ("); i > 0 && strings.HasSuffix(s, ")") {
-		return Blocker{ID: s[:i], Type: types.DependencyType(s[i+2 : len(s)-1])}
-	}
 	if strings.HasPrefix(s, externalBlockerPrefix) {
 		return Blocker{ID: s}
+	}
+	if i := strings.LastIndex(s, " ("); i > 0 && strings.HasSuffix(s, ")") {
+		return Blocker{ID: s[:i], Type: types.DependencyType(s[i+2 : len(s)-1])}
 	}
 	return Blocker{ID: s, Type: types.DepBlocks}
 }
