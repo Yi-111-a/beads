@@ -1,0 +1,462 @@
+package scripts_test
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// bazel-farm.yml: the one pull_request_target caller of bazel.yml. It gives
+// the RBE secrets to fork PRs whose author and triggering user are on the
+// base branch's allowlist (engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Trusted-
+// author fork PRs"). Every property below is load-bearing for that trust
+// boundary; relaxing one is a security decision, not a refactor.
+const (
+	bazelFarmWorkflowName  = "bazel-farm.yml"
+	bazelFarmWorkflowTitle = "Bazel Farm (trusted forks)"
+	bazelFarmAllowlist     = ".github/bazel-farm-allowlist.txt"
+	bazelFarmAuthorize     = ".github/scripts/bazel-farm-authorize.sh"
+
+	// bazel.yml's rbe job: a fork runs remotely only for this caller's
+	// authorized pull_request_target call with a pinned checkout.
+	bazelForkFarmValue = "${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' && inputs.checkout-sha != '' }}"
+	// Every bazel.yml checkout: the caller's pinned SHA (empty: the event's
+	// default ref) and no token in .git/config.
+	bazelCheckoutRef = "${{ inputs.checkout-sha }}"
+)
+
+// The logins on the allowlist, the same as gascity's
+// .github/blacksmith-allowlist.txt. A change here is a trust decision.
+var bazelFarmLogins = []string{"csells", "julianknutsen", "quad341", "sjarmak"}
+
+func TestBazelFarmWorkflowSecurity(t *testing.T) {
+	rel := filepath.Join(".github", "workflows", bazelFarmWorkflowName)
+	root := readYAMLNode(t, rel)
+	raw := readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+bazelFarmWorkflowName)
+
+	var doc struct {
+		Name string `yaml:"name"`
+		On   map[string]struct {
+			Types    []string `yaml:"types"`
+			Branches []string `yaml:"branches"`
+		} `yaml:"on"`
+		Concurrency struct {
+			Group            string `yaml:"group"`
+			CancelInProgress any    `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
+		Permissions any               `yaml:"permissions"`
+		Env         map[string]string `yaml:"env"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Name != bazelFarmWorkflowTitle {
+		t.Errorf("name = %q, want %q (bazel-autofix.yml and docs-autofix.yml must never list it)", doc.Name, bazelFarmWorkflowTitle)
+	}
+
+	// Trigger: pull_request_target only (the base branch's copy of this
+	// file and of bazel.yml runs), the four PR-code-changing actions, main.
+	if got := yamlMapKeys(root, "on"); !reflect.DeepEqual(got, []string{"pull_request_target"}) {
+		t.Errorf("triggers = %v, want exactly [pull_request_target]", got)
+	}
+	prt := doc.On["pull_request_target"]
+	if want := []string{"opened", "synchronize", "reopened", "ready_for_review"}; !reflect.DeepEqual(prt.Types, want) {
+		t.Errorf("pull_request_target types = %v, want %v (no labeled/edited/comment-driven runs)", prt.Types, want)
+	}
+	if !reflect.DeepEqual(prt.Branches, []string{"main"}) {
+		t.Errorf("pull_request_target branches = %v, want [main]", prt.Branches)
+	}
+
+	// One run per PR, superseded by the next event.
+	if doc.Concurrency.Group != "bazel-farm-${{ github.event.pull_request.number }}" || doc.Concurrency.CancelInProgress != true {
+		t.Errorf("concurrency = %+v; want group bazel-farm-<pr number>, cancel-in-progress true", doc.Concurrency)
+	}
+	if len(doc.Env) != 0 {
+		t.Errorf("workflow env = %v; want none (nothing workflow-wide reaches PR code)", doc.Env)
+	}
+
+	// Permissions: contents: read at the workflow and on every job, and
+	// nothing else anywhere in the file.
+	readOnly := map[string]any{"contents": "read"}
+	if !reflect.DeepEqual(doc.Permissions, readOnly) {
+		t.Errorf("workflow permissions = %v, want %v", doc.Permissions, readOnly)
+	}
+	workflow := readCIWorkflow(t, bazelFarmWorkflowName)
+	var jobs []string
+	for name, job := range workflow.Jobs {
+		jobs = append(jobs, name)
+		if !reflect.DeepEqual(job.Permissions, readOnly) {
+			t.Errorf("job %s permissions = %v, want %v", name, job.Permissions, readOnly)
+		}
+		if len(job.Env) != 0 {
+			t.Errorf("job %s env = %v; want none", name, job.Env)
+		}
+	}
+	sort.Strings(jobs)
+	if !reflect.DeepEqual(jobs, []string{"authorize", "farm"}) {
+		t.Fatalf("jobs = %v, want [authorize farm]", jobs)
+	}
+	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
+	walkYAML(root, "", func(path string, key bool, value string) {
+		if strings.Contains(path, "permissions") && !key && value != "read" {
+			t.Errorf("%s = %q; only read permissions are allowed", path, value)
+		}
+		if key && value == "continue-on-error" {
+			t.Errorf("%s hides a failure", path)
+		}
+		if !key && value == "inherit" {
+			t.Errorf("%s: secrets: inherit; pass the four RBE secrets explicitly", path)
+		}
+		// Secrets only in the farm call's secrets block.
+		if !key && secretRef.MatchString(value) && !strings.HasPrefix(path, ".jobs.farm.secrets.") {
+			t.Errorf("%s reads secrets (%q); only .jobs.farm.secrets may", path, value)
+		}
+		// No expression in any script: event data (branch names, titles,
+		// logins) reaches scripts through env only.
+		if !key && strings.HasSuffix(path, ".run") && strings.Contains(value, "${{") {
+			t.Errorf("%s interpolates an expression into a script: %q", path, value)
+		}
+	})
+
+	// authorize: no PR code, no secrets, the base commit's allowlist.
+	auth := workflow.job(t, "authorize")
+	const wantAuthIf = "github.event.pull_request.base.repo.full_name == github.repository && " +
+		"github.event.pull_request.head.repo.full_name != github.repository"
+	if auth.If != wantAuthIf || auth.RunsOn != "ubuntu-latest" || len(auth.Needs) != 0 {
+		t.Errorf("authorize if=%q runs-on=%q needs=%v; want the fork prefilter %q on ubuntu-latest", auth.If, auth.RunsOn, auth.Needs, wantAuthIf)
+	}
+	if auth.TimeoutMinutes <= 0 || auth.TimeoutMinutes > 10 {
+		t.Errorf("authorize timeout-minutes = %d, want 1..10", auth.TimeoutMinutes)
+	}
+	if want := map[string]string{"allowed": "${{ steps.decide.outputs.allowed }}"}; !reflect.DeepEqual(auth.Outputs, want) {
+		t.Errorf("authorize outputs = %v, want %v", auth.Outputs, want)
+	}
+	if len(auth.Steps) != 2 {
+		t.Fatalf("authorize has %d steps, want the base checkout and the decision", len(auth.Steps))
+	}
+	checkout := auth.Steps[0]
+	if checkout.Uses != "actions/checkout@"+checkoutSHA {
+		t.Errorf("authorize checkout uses %q, want actions/checkout@%s", checkout.Uses, checkoutSHA)
+	}
+	wantCheckout := map[string]string{
+		"ref":                       "${{ github.sha }}",
+		"persist-credentials":       "false",
+		"sparse-checkout":           bazelFarmAllowlist + "\n" + bazelFarmAuthorize + "\n",
+		"sparse-checkout-cone-mode": "false",
+	}
+	if !reflect.DeepEqual(checkout.With, wantCheckout) {
+		t.Errorf("authorize checkout with = %q; want %q (the run's own base commit, never a PR ref)", checkout.With, wantCheckout)
+	}
+	decide := auth.Steps[1]
+	wantEnv := map[string]string{
+		"ALLOWLIST":      bazelFarmAllowlist,
+		"EVENT_NAME":     "${{ github.event_name }}",
+		"ACTION":         "${{ github.event.action }}",
+		"REPOSITORY":     "${{ github.repository }}",
+		"BASE_REPO":      "${{ github.event.pull_request.base.repo.full_name }}",
+		"HEAD_REPO":      "${{ github.event.pull_request.head.repo.full_name }}",
+		"BASE_REF":       "${{ github.event.pull_request.base.ref }}",
+		"DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+		"HEAD_SHA":       "${{ github.event.pull_request.head.sha }}",
+		"PR_AUTHOR":      "${{ github.event.pull_request.user.login }}",
+		"SENDER":         "${{ github.event.sender.login }}",
+	}
+	if decide.ID != "decide" || decide.Uses != "" || decide.Run != "bash "+bazelFarmAuthorize || !reflect.DeepEqual(decide.Env, wantEnv) {
+		t.Errorf("authorize decision step id=%q uses=%q run=%q env=%v; want id decide running %s with env %v",
+			decide.ID, decide.Uses, decide.Run, decide.Env, bazelFarmAuthorize, wantEnv)
+	}
+
+	// farm: bazel.yml from the same base commit, only when authorized, with
+	// the four RBE secrets and the event's pinned head SHA.
+	farm := workflow.job(t, "farm")
+	if farm.Uses != "./.github/workflows/"+bazelWorkflowName || !reflect.DeepEqual([]string(farm.Needs), []string{"authorize"}) ||
+		farm.If != "${{ needs.authorize.outputs.allowed == 'true' }}" || farm.RunsOn != "" || len(farm.Steps) != 0 {
+		t.Errorf("farm uses=%q needs=%v if=%q; want a call of ./.github/workflows/%s needing authorize, if allowed == 'true'",
+			farm.Uses, farm.Needs, farm.If, bazelWorkflowName)
+	}
+	gotSecrets := map[string]string{}
+	if m, ok := farm.Secrets.(map[string]any); ok {
+		for k, v := range m {
+			gotSecrets[k] = fmt.Sprint(v)
+		}
+	}
+	if !reflect.DeepEqual(gotSecrets, bazelCallSecrets) {
+		t.Errorf("farm secrets = %v, want exactly %v", farm.Secrets, bazelCallSecrets)
+	}
+	wantWith := map[string]string{
+		"checkout-sha":        "${{ github.event.pull_request.head.sha }}",
+		"fork-farm":           "authorized",
+		"integration":         "off",
+		"build-artifact-name": "bazel-farm-build-artifacts",
+	}
+	if !reflect.DeepEqual(farm.With, wantWith) {
+		t.Errorf("farm with = %v, want exactly %v", farm.With, wantWith)
+	}
+}
+
+// bazel.yml's side of the farm: the pinned checkout, the one decision input,
+// and nothing a pull_request_target run could hand a privileged consumer.
+func TestBazelWorkflowForkFarmInputs(t *testing.T) {
+	call := readBazelWorkflowCall(t)
+	for name, want := range map[string]string{"checkout-sha": "", "fork-farm": "off"} {
+		if in, ok := call.Inputs[name]; !ok || in.Type != "string" || in.Default != want {
+			t.Errorf("workflow_call input %s = %+v, want type string, default %q", name, in, want)
+		}
+	}
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	checkouts := 0
+	for name, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, "${{") {
+				t.Errorf("%s job %s step %q interpolates an expression into its script", bazelWorkflowName, name, step.Name)
+			}
+			if actionFamily(step.Uses) != "actions/checkout" {
+				continue
+			}
+			checkouts++
+			want := map[string]string{"ref": bazelCheckoutRef, "persist-credentials": "false"}
+			if !reflect.DeepEqual(step.With, want) {
+				t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
+			}
+		}
+	}
+	if checkouts != len(workflow.Jobs)-1 {
+		t.Errorf("%d checkouts in %s, want one per lane (%d)", checkouts, bazelWorkflowName, len(workflow.Jobs)-1)
+	}
+	if got := workflow.job(t, bazelRBEJobName).Steps[0].Env["FORK_FARM"]; got != bazelForkFarmValue {
+		t.Errorf("rbe FORK_FARM = %q, want %q", got, bazelForkFarmValue)
+	}
+	// inputs.checkout-sha: only the checkouts' ref and FORK_FARM.
+	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", bazelWorkflowName)), "", func(path string, key bool, value string) {
+		if key || !strings.Contains(value, "inputs.checkout-sha") {
+			return
+		}
+		if value == bazelCheckoutRef && strings.HasSuffix(path, ".with.ref") {
+			return
+		}
+		if value == bazelForkFarmValue && path == ".jobs."+bazelRBEJobName+".steps[0].env.FORK_FARM" {
+			return
+		}
+		t.Errorf("%s: %s uses inputs.checkout-sha (%q); only checkout refs and FORK_FARM may", bazelWorkflowName, path, value)
+	})
+	var conc struct {
+		Concurrency struct {
+			CancelInProgress string `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
+	}
+	if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+bazelWorkflowName)), &conc); err != nil {
+		t.Fatal(err)
+	}
+	if want := "${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}"; conc.Concurrency.CancelInProgress != want {
+		t.Errorf("%s cancel-in-progress = %q, want %q", bazelWorkflowName, conc.Concurrency.CancelInProgress, want)
+	}
+
+	// Only bazel-farm.yml passes the farm inputs (pr.yml's call is pinned by
+	// bazelPRCallWith; nightly.yml's here).
+	entries, err := os.ReadDir(filepath.Join(sourceRepoRoot(t), ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yml") || entry.Name() == bazelFarmWorkflowName {
+			continue
+		}
+		for jobName, job := range readCIWorkflow(t, entry.Name()).Jobs {
+			for _, in := range []string{"checkout-sha", "fork-farm"} {
+				if _, ok := job.With[in]; ok {
+					t.Errorf("%s job %s passes %s; only %s may", entry.Name(), jobName, in, bazelFarmWorkflowName)
+				}
+			}
+		}
+	}
+}
+
+// No privileged workflow consumes anything from a farm run: every
+// workflow_run consumer watches only "PR" and acts only on pull_request
+// runs, and nothing downloads another run's artifacts by run id.
+func TestBazelFarmArtifactsHaveNoPrivilegedConsumer(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(sourceRepoRoot(t), ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumers := 0
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yml") {
+			continue
+		}
+		rel := filepath.Join(".github", "workflows", entry.Name())
+		raw := readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+entry.Name())
+		if strings.Contains(raw, bazelFarmWorkflowTitle) && entry.Name() != bazelFarmWorkflowName {
+			t.Errorf("%s names %q; nothing may consume a farm run", entry.Name(), bazelFarmWorkflowTitle)
+		}
+		for jobName, job := range readCIWorkflow(t, entry.Name()).Jobs {
+			for _, step := range job.Steps {
+				if _, ok := step.With["run-id"]; ok {
+					t.Errorf("%s job %s step %q downloads another run's artifacts by run-id", entry.Name(), jobName, step.Name)
+				}
+			}
+		}
+		if !contains(yamlMapKeys(readYAMLNode(t, rel), "on"), "workflow_run") {
+			continue
+		}
+		consumers++
+		var doc struct {
+			On struct {
+				WorkflowRun struct {
+					Workflows []string `yaml:"workflows"`
+				} `yaml:"workflow_run"`
+			} `yaml:"on"`
+		}
+		if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(doc.On.WorkflowRun.Workflows, []string{"PR"}) {
+			t.Errorf("%s workflow_run workflows = %v, want exactly [PR]", entry.Name(), doc.On.WorkflowRun.Workflows)
+		}
+		for jobName, job := range readCIWorkflow(t, entry.Name()).Jobs {
+			if !strings.Contains(job.If, "github.event.workflow_run.event == 'pull_request'") {
+				t.Errorf("%s job %s if = %q; want it limited to pull_request runs (a farm run is pull_request_target)", entry.Name(), jobName, job.If)
+			}
+		}
+	}
+	if consumers == 0 {
+		t.Errorf("found no workflow_run consumers; the scan is broken (bazel-autofix.yml, docs-autofix.yml)")
+	}
+}
+
+// The allowlist is the trust decision: exactly these logins, valid ones.
+func TestBazelFarmAllowlist(t *testing.T) {
+	var got []string
+	loginRe := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}$`)
+	for _, line := range strings.Split(readPolicyFile(t, sourceRepoRoot(t), bazelFarmAllowlist), "\n") {
+		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if line == "" {
+			continue
+		}
+		if !loginRe.MatchString(line) {
+			t.Errorf("allowlist entry %q is not a lowercase GitHub login", line)
+		}
+		got = append(got, line)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, bazelFarmLogins) {
+		t.Errorf("allowlist = %v, want %v (changing it is a trust decision: update bazelFarmLogins deliberately)", got, bazelFarmLogins)
+	}
+}
+
+func TestBazelFarmAuthorizeScript(t *testing.T) {
+	bash := requireHostTool(t, "bash")
+	script := filepath.Join(sourceRepoRoot(t), bazelFarmAuthorize)
+	dir := t.TempDir()
+	list := filepath.Join(dir, "allowlist.txt")
+	if err := os.WriteFile(list, []byte("# comment julianknutsen-evil\n\nJulianKnutsen\n  quad341   # trailing comment\nnot a login!\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := map[string]string{
+		"ALLOWLIST":      list,
+		"EVENT_NAME":     "pull_request_target",
+		"ACTION":         "synchronize",
+		"REPOSITORY":     "gastownhall/beads",
+		"BASE_REPO":      "gastownhall/beads",
+		"HEAD_REPO":      "julianknutsen/beads",
+		"BASE_REF":       "main",
+		"DEFAULT_BRANCH": "main",
+		"HEAD_SHA":       strings.Repeat("ab", 20),
+		"PR_AUTHOR":      "julianknutsen",
+		"SENDER":         "julianknutsen",
+	}
+	run := func(t *testing.T, env map[string]string) (string, string, error) {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "out")
+		cmd := exec.Command(bash, script)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_OUTPUT=" + out}
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		logs, err := cmd.CombinedOutput()
+		data, _ := os.ReadFile(out)
+		return string(data), string(logs), err
+	}
+	cases := []struct {
+		name    string
+		change  map[string]string
+		allowed bool
+	}{
+		{"listed author pushes", nil, true},
+		{"opened", map[string]string{"ACTION": "opened"}, true},
+		{"reopened", map[string]string{"ACTION": "reopened"}, true},
+		{"ready_for_review", map[string]string{"ACTION": "ready_for_review"}, true},
+		{"case-insensitive", map[string]string{"PR_AUTHOR": "JULIANKNUTSEN", "SENDER": "Quad341"}, true},
+		{"listed via trailing-comment line", map[string]string{"PR_AUTHOR": "quad341", "SENDER": "quad341"}, true},
+		{"author not listed", map[string]string{"PR_AUTHOR": "mallory"}, false},
+		{"collaborator pushes to a listed author's fork", map[string]string{"SENDER": "mallory"}, false},
+		{"listed pusher on an unlisted author's PR", map[string]string{"PR_AUTHOR": "mallory", "SENDER": "julianknutsen"}, false},
+		{"bot sender", map[string]string{"SENDER": "dependabot[bot]"}, false},
+		{"empty sender", map[string]string{"SENDER": ""}, false},
+		{"login in a comment only", map[string]string{"PR_AUTHOR": "julianknutsen-evil", "SENDER": "julianknutsen-evil"}, false},
+		{"login with newline", map[string]string{"SENDER": "julianknutsen\nquad341"}, false},
+		{"login with shell metacharacters", map[string]string{"SENDER": "julianknutsen;id"}, false},
+		{"same-repo PR", map[string]string{"HEAD_REPO": "gastownhall/beads"}, false},
+		{"same-repo PR, other case", map[string]string{"HEAD_REPO": "GastownHall/Beads"}, false},
+		{"no head repo (deleted fork)", map[string]string{"HEAD_REPO": ""}, false},
+		{"other base repo", map[string]string{"BASE_REPO": "someone/beads"}, false},
+		{"not the default branch", map[string]string{"BASE_REF": "release/1.0"}, false},
+		{"pull_request event", map[string]string{"EVENT_NAME": "pull_request"}, false},
+		{"labeled", map[string]string{"ACTION": "labeled"}, false},
+		{"edited", map[string]string{"ACTION": "edited"}, false},
+		{"short sha", map[string]string{"HEAD_SHA": "abcdef1"}, false},
+		{"uppercase sha", map[string]string{"HEAD_SHA": strings.Repeat("AB", 20)}, false},
+		{"ref instead of sha", map[string]string{"HEAD_SHA": "refs/heads/main"}, false},
+		{"sha with suffix", map[string]string{"HEAD_SHA": strings.Repeat("ab", 20) + "\nx"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := map[string]string{}
+			for k, v := range base {
+				env[k] = v
+			}
+			for k, v := range c.change {
+				env[k] = v
+			}
+			out, logs, err := run(t, env)
+			if err != nil {
+				t.Fatalf("script failed: %v\n%s", err, logs)
+			}
+			if want := fmt.Sprintf("allowed=%t\n", c.allowed); out != want {
+				t.Errorf("GITHUB_OUTPUT = %q, want %q\n%s", out, want, logs)
+			}
+			if strings.Contains(logs, ";id") || strings.Contains(logs, "[bot]") {
+				t.Errorf("log echoes an unvalidated login:\n%s", logs)
+			}
+		})
+	}
+	t.Run("missing allowlist fails", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		env["ALLOWLIST"] = filepath.Join(dir, "missing.txt")
+		if out, logs, err := run(t, env); err == nil || strings.Contains(out, "allowed=true") {
+			t.Errorf("want failure without allowed=true; out=%q\n%s", out, logs)
+		}
+	})
+	t.Run("real allowlist admits a listed author", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		env["ALLOWLIST"] = filepath.Join(sourceRepoRoot(t), bazelFarmAllowlist)
+		env["PR_AUTHOR"], env["SENDER"] = "sjarmak", "csells"
+		if out, logs, err := run(t, env); err != nil || out != "allowed=true\n" {
+			t.Errorf("out=%q err=%v\n%s", out, err, logs)
+		}
+	})
+}

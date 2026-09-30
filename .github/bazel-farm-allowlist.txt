@@ -1,0 +1,14 @@
+# GitHub logins whose fork PRs get the Bazel remote-execution farm
+# (.github/workflows/bazel-farm.yml). One login per line; blank lines and
+# # comments are ignored; matching is case-insensitive.
+#
+# Read only from the base branch (the pull_request_target run's own commit),
+# never from a PR: editing this file in a PR changes nothing until it merges.
+# Both the PR author and the user who triggered the run (opener, pusher,
+# reopener) must be listed. A listed login gets same-repo-PR-level trust:
+# its PR code runs with the RBE client certificate. Same list as gascity's
+# .github/blacksmith-allowlist.txt.
+julianknutsen
+quad341
+sjarmak
+csells
