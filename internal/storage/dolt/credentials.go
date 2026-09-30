@@ -270,8 +270,12 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 		// decrypt funnel, as embeddeddolt does, so every reader reports the
 		// credential problem rather than a bare cipher error. decryptWithKey
 		// stays unwrapped for the key-rotation path, which reads old keys on
-		// purpose and must not report a rotation miss as a mismatch.
-		return "", storage.CredentialKeyMismatchError(credentialKeyFile, err)
+		// purpose and must not report a rotation miss as a mismatch. Name the
+		// resolved path rather than the bare filename: initCredentialKey looks
+		// this same basename up under both beadsDir and the legacy dbPath, so
+		// during the migration window two files carrying different keys can
+		// share the name and the bare one does not say which is meant.
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
 	}
 	return plaintext, nil
 }

@@ -100,7 +100,7 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 		// decrypted on this machine, and re-adding the peer is the fix.
 		// Classify it through the same sentinel so federation status reports
 		// the credential problem rather than an unreachable peer.
-		return "", storage.CredentialKeyMismatchError(credentialKeyFile, fmt.Errorf("ciphertext too short"))
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), fmt.Errorf("ciphertext too short"))
 	}
 	nonce, ciphertext := encrypted[:nonceSize], encrypted[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
@@ -111,7 +111,7 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 		// single decrypt funnel so every reader reports it: peer resolution for
 		// the remote verbs, GetFederationPeer, ListFederationPeers. The wording
 		// is shared with package dolt, which enriches its own two read paths.
-		return "", storage.CredentialKeyMismatchError(credentialKeyFile, err)
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
 	}
 	return string(plaintext), nil
 }

@@ -895,8 +895,12 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		t.Fatalf("encryptWithKey() error = %v", err)
 	}
 
-	// credentialKey is preset, so ensureCredentialKey is a no-op and no test
-	// writes a key file.
+	// beadsDir is set only so the enrichment can resolve the key path it names;
+	// credentialKey is preset, so initCredentialKey never runs and no test
+	// writes a key file. Leaving it empty would make the resolved-path fragment
+	// below vacuous, because filepath.Join("", credentialKeyFile) is the bare
+	// basename the fix replaced (GH#5214 review).
+	beadsDir := t.TempDir()
 	newStore := func(t *testing.T) (*DoltStore, sqlmock.Sqlmock) {
 		t.Helper()
 		db, mock, err := sqlmock.New()
@@ -904,7 +908,7 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 			t.Fatalf("sqlmock: %v", err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
-		return &DoltStore{db: db, credentialKey: localKey}, mock
+		return &DoltStore{db: db, credentialKey: localKey, beadsDir: beadsDir}, mock
 	}
 
 	peerRows := func() *sqlmock.Rows {
@@ -921,9 +925,11 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 		// The shared enrichment, pinned verbatim. The machine-local key file is
 		// context in a parenthetical, not an asserted cause: an AES-GCM open also
 		// fails on a tampered blob and on a row still under the legacy key, and
-		// re-adding the peer is the fix in all three cases.
+		// re-adding the peer is the fix in all three cases. The key file is named
+		// by its resolved path, because this basename is also looked up under the
+		// legacy dbPath and the bare name would not say which file is meant.
 		"stored peer credentials cannot be decrypted with this machine's credential key " +
-			"(the key file " + credentialKeyFile + " is machine-local and does not replicate with the database); " +
+			"(the key file " + filepath.Join(beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
 			"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine",
 		// The cipher error stays wrapped, so the raw cause is still readable.
 		"cipher: message authentication failed",
@@ -964,6 +970,35 @@ func TestFederationPeerDecryptKeyMismatchNamesTheLocalKey(t *testing.T) {
 
 		_, err := store.ListFederationPeers(t.Context())
 		assertMismatch(t, err)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	// withPeerCredentials is the seam that carries the sentinel into
+	// `bd federation status` on this backend, mirroring embeddeddolt's
+	// TestWithPeerAuth_KeyMismatchFailsClosed: it must fail closed rather than
+	// invoke the operation with no credentials, which would present the wrong
+	// identity to the peer and re-blame the network (GH#5214 review).
+	t.Run("withPeerCredentials", func(t *testing.T) {
+		store, mock := newStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+			WithArgs("team").
+			WillReturnRows(peerRows())
+
+		called := false
+		err := store.withPeerCredentials(t.Context(), "team", func(*remoteCredentials) error {
+			called = true
+			return nil
+		})
+		if called {
+			t.Error("withPeerCredentials ran the operation, want fail-closed")
+		}
+		assertMismatch(t, err)
+		// The seam's own wrap, so the sentinel survives the extra hop.
+		if want := "failed to get peer credentials:"; !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet sqlmock expectations: %v", err)
 		}

@@ -214,9 +214,15 @@ func rotateCredentialKey(t *testing.T, store *EmbeddedDoltStore) {
 // parenthetical rather than as the asserted cause, because an AES-GCM open also
 // fails on a tampered blob and on a row still under the legacy key; re-adding
 // the peer is the fix in all three cases (GH#5085 review).
-const wantKeyMismatchClause = "stored peer credentials cannot be decrypted with this machine's credential key " +
-	"(the key file " + credentialKeyFile + " is machine-local and does not replicate with the database); " +
-	"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine"
+//
+// It takes the store because the clause names the key file by its RESOLVED
+// path, not by basename, so this pin fails if a caller regresses to the bare
+// const (GH#5214 review).
+func wantKeyMismatchClause(store *EmbeddedDoltStore) string {
+	return "stored peer credentials cannot be decrypted with this machine's credential key " +
+		"(the key file " + filepath.Join(store.beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
+		"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine"
+}
 
 // Pins the decrypt-failure branch (GH#5085 review): a peer row whose password
 // was encrypted with a different machine's key must fail with the local context
@@ -236,7 +242,7 @@ func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
 	wantFragments := []string{
 		// Both read paths name the peer, so the operator knows which one to re-add.
 		"for peer team",
-		wantKeyMismatchClause,
+		wantKeyMismatchClause(store),
 		// The cipher error stays wrapped so the raw cause is still readable.
 		"cipher: message authentication failed",
 	}
@@ -287,7 +293,7 @@ func TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch(t *testing.T) {
 	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
 	}
-	for _, want := range []string{wantKeyMismatchClause, "ciphertext too short"} {
+	for _, want := range []string{wantKeyMismatchClause(store), "ciphertext too short"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -330,7 +336,7 @@ func TestWithPeerAuth_KeyMismatchFailsClosed(t *testing.T) {
 	for _, want := range []string{
 		"resolve peer credentials:",
 		"decrypt password for peer team:",
-		wantKeyMismatchClause,
+		wantKeyMismatchClause(store),
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
