@@ -155,12 +155,16 @@ func TestWithPeerAuth(t *testing.T) {
 
 func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T) {
 	// Pinned verbatim, not matched by substring: the peer name, the username,
-	// and the Warning: prefix are the parts an operator reads, so a wording
-	// change has to be made here deliberately.
+	// the stored tier, and the Warning: prefix are the parts an operator
+	// reads, so a wording change has to be made here deliberately.
 	const wantOpenPwdWarning = `Warning: peer "open-pwd" stores a username with an empty password, ` +
 		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
-		`store a password with 'bd federation add-peer open-pwd <url> ` +
-		`--user peeruser --password <password>'.` + "\n"
+		`store a password by re-running 'bd federation add-peer open-pwd <url> ` +
+		`--user peeruser' and entering it at the prompt.` + "\n"
+	const wantTieredWarning = `Warning: peer "tiered" stores a username with an empty password, ` +
+		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
+		`store a password by re-running 'bd federation add-peer tiered <url> ` +
+		`--user peeruser --sovereignty T2' and entering it at the prompt.` + "\n"
 
 	cases := []struct {
 		name       string
@@ -182,6 +186,19 @@ func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T)
 			},
 			remote: "open-pwd", ambient: "envpass", ambientSet: true,
 			wantLine: wantOpenPwdWarning,
+		},
+		{
+			// add-peer upserts sovereignty along with the credentials, so the
+			// suggested re-run must carry the stored tier or it clears it.
+			name: "suggested re-add keeps the stored sovereignty tier",
+			peer: &storage.FederationPeer{
+				Name:        "tiered",
+				RemoteURL:   "https://peer.example/peerdb",
+				Username:    "peeruser",
+				Sovereignty: "T2",
+			},
+			remote: "tiered", ambient: "envpass", ambientSet: true,
+			wantLine: wantTieredWarning,
 		},
 		{
 			name: "stored password suppresses nothing the operator can act on",

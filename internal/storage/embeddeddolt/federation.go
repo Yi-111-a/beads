@@ -220,12 +220,20 @@ func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationP
 	if os.Getenv("DOLT_REMOTE_PASSWORD") == "" {
 		return
 	}
+	// add-peer upserts the whole row, so a re-run without --sovereignty
+	// clears a stored tier (GH#5213): carry the stored tier into the
+	// suggested command. The password is left to add-peer's no-echo prompt
+	// rather than suggested as an argument that lands in shell history.
+	sovereignty := ""
+	if p.Sovereignty != "" {
+		sovereignty = " --sovereignty " + p.Sovereignty
+	}
 	fmt.Fprintf(federationWarnWriter,
 		"Warning: peer %[1]q stores a username with an empty password, "+
 			"which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; "+
-			"store a password with 'bd federation add-peer %[1]s <url> "+
-			"--user %[2]s --password <password>'.\n",
-		peer, p.Username)
+			"store a password by re-running 'bd federation add-peer %[1]s <url> "+
+			"--user %[2]s%[3]s' and entering it at the prompt.\n",
+		peer, p.Username, sovereignty)
 }
 
 // verifyPeerRemoteURL fails closed when the live remote named peer does not
