@@ -37,9 +37,15 @@ const (
 	bazelAllowUnsafeCheckout = "${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}"
 )
 
-// The logins on the allowlist, the same as gascity's
-// .github/blacksmith-allowlist.txt. A change here is a trust decision.
-var bazelFarmLogins = []string{"csells", "julianknutsen", "quad341", "sjarmak"}
+// The users on the allowlist, numeric id -> login (gh api users/<login>
+// --jq .id), the same people as gascity's .github/blacksmith-allowlist.txt.
+// A change here is a trust decision.
+var bazelFarmUsers = map[string]string{
+	"8082291":  "julianknutsen",
+	"91582":    "quad341",
+	"36544495": "sjarmak",
+	"2568253":  "csells",
+}
 
 func TestBazelFarmWorkflowSecurity(t *testing.T) {
 	rel := filepath.Join(".github", "workflows", bazelFarmWorkflowName)
@@ -174,6 +180,7 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 		"PR_AUTHOR":      "${{ github.event.pull_request.user.login }}",
 		"PR_AUTHOR_ID":   "${{ github.event.pull_request.user.id }}",
 		"SENDER":         "${{ github.event.sender.login }}",
+		"SENDER_ID":      "${{ github.event.sender.id }}",
 	}
 	if decide.ID != "decide" || decide.Uses != "" || decide.Run != "bash "+bazelFarmAuthorize || !reflect.DeepEqual(decide.Env, wantEnv) {
 		t.Errorf("authorize decision step id=%q uses=%q run=%q env=%v; want id decide running %s with env %v",
@@ -356,23 +363,25 @@ func TestBazelFarmArtifactsHaveNoPrivilegedConsumer(t *testing.T) {
 	}
 }
 
-// The allowlist is the trust decision: exactly these logins, valid ones.
+// The allowlist is the trust decision: exactly these numeric user ids, each
+// with its login as a comment for humans (ids are what the script matches:
+// a renamed account's old login can be registered by anyone).
 func TestBazelFarmAllowlist(t *testing.T) {
-	var got []string
-	loginRe := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}$`)
+	got := map[string]string{}
+	entry := regexp.MustCompile(`^([1-9][0-9]{0,19}) # ([a-z0-9][a-z0-9-]{0,38})$`)
 	for _, line := range strings.Split(readPolicyFile(t, sourceRepoRoot(t), bazelFarmAllowlist), "\n") {
-		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if !loginRe.MatchString(line) {
-			t.Errorf("allowlist entry %q is not a lowercase GitHub login", line)
+		m := entry.FindStringSubmatch(line)
+		if m == nil {
+			t.Errorf("allowlist line %q is not `<numeric id> # <login>`", line)
+			continue
 		}
-		got = append(got, line)
+		got[m[1]] = m[2]
 	}
-	sort.Strings(got)
-	if !reflect.DeepEqual(got, bazelFarmLogins) {
-		t.Errorf("allowlist = %v, want %v (changing it is a trust decision: update bazelFarmLogins deliberately)", got, bazelFarmLogins)
+	if !reflect.DeepEqual(got, bazelFarmUsers) {
+		t.Errorf("allowlist = %v, want %v (changing it is a trust decision: update bazelFarmUsers deliberately)", got, bazelFarmUsers)
 	}
 }
 
@@ -381,7 +390,9 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 	script := filepath.Join(sourceRepoRoot(t), bazelFarmAuthorize)
 	dir := t.TempDir()
 	list := filepath.Join(dir, "allowlist.txt")
-	if err := os.WriteFile(list, []byte("# comment julianknutsen-evil\n\nJulianKnutsen\n  quad341   # trailing comment\nnot a login!\n"), 0o644); err != nil {
+	// 1001: listed; 1002: listed with trailing comment and spaces; 1003
+	// appears only inside a comment.
+	if err := os.WriteFile(list, []byte("# comment 1003\n\n1001 # alice\n  1002   # bob\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	base := map[string]string{
@@ -390,14 +401,15 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 		"ACTION":         "synchronize",
 		"REPOSITORY":     "gastownhall/beads",
 		"BASE_REPO":      "gastownhall/beads",
-		"HEAD_REPO":      "julianknutsen/beads",
-		"HEAD_OWNER_ID":  "8082291",
-		"PR_AUTHOR_ID":   "8082291",
+		"HEAD_REPO":      "alice/beads",
+		"HEAD_OWNER_ID":  "1001",
 		"BASE_REF":       "main",
 		"DEFAULT_BRANCH": "main",
 		"HEAD_SHA":       strings.Repeat("ab", 20),
-		"PR_AUTHOR":      "julianknutsen",
-		"SENDER":         "julianknutsen",
+		"PR_AUTHOR":      "alice",
+		"PR_AUTHOR_ID":   "1001",
+		"SENDER":         "alice",
+		"SENDER_ID":      "1001",
 	}
 	run := func(t *testing.T, env map[string]string) (string, string, error) {
 		t.Helper()
@@ -411,6 +423,16 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 		data, _ := os.ReadFile(out)
 		return string(data), string(logs), err
 	}
+	with := func(change map[string]string) map[string]string {
+		env := map[string]string{}
+		for k, v := range base {
+			env[k] = v
+		}
+		for k, v := range change {
+			env[k] = v
+		}
+		return env
+	}
 	cases := []struct {
 		name    string
 		change  map[string]string
@@ -418,32 +440,42 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 	}{
 		{"listed author pushes", nil, true},
 		{"opened", map[string]string{"ACTION": "opened"}, true},
-		{"reopened", map[string]string{"ACTION": "reopened"}, false},
-		{"ready_for_review", map[string]string{"ACTION": "ready_for_review"}, false},
-		{"unanchored action", map[string]string{"ACTION": "xopenedx"}, false},
-		{"cross-fork: head in someone else's fork", map[string]string{"HEAD_REPO": "mallory/beads", "HEAD_OWNER_ID": "666"}, false},
-		{"head owner id missing", map[string]string{"HEAD_OWNER_ID": ""}, false},
-		{"author id missing", map[string]string{"HEAD_OWNER_ID": "", "PR_AUTHOR_ID": ""}, false},
-		{"owner id not numeric", map[string]string{"HEAD_OWNER_ID": "8082291x", "PR_AUTHOR_ID": "8082291x"}, false},
-		{"base repo prefix", map[string]string{"BASE_REPO": "gastownhall/beads-evil"}, false},
-		{"case-insensitive", map[string]string{"PR_AUTHOR": "JULIANKNUTSEN", "SENDER": "Quad341"}, true},
-		{"listed via trailing-comment line", map[string]string{"PR_AUTHOR": "quad341", "SENDER": "quad341"}, true},
-		{"author not listed", map[string]string{"PR_AUTHOR": "mallory"}, false},
-		{"collaborator pushes to a listed author's fork", map[string]string{"SENDER": "mallory"}, false},
-		{"listed pusher on an unlisted author's PR", map[string]string{"PR_AUTHOR": "mallory", "SENDER": "julianknutsen"}, false},
-		{"bot sender", map[string]string{"SENDER": "dependabot[bot]"}, false},
-		{"empty sender", map[string]string{"SENDER": ""}, false},
-		{"login in a comment only", map[string]string{"PR_AUTHOR": "julianknutsen-evil", "SENDER": "julianknutsen-evil"}, false},
-		{"login with newline", map[string]string{"SENDER": "julianknutsen\nquad341"}, false},
-		{"login with shell metacharacters", map[string]string{"SENDER": "julianknutsen;id"}, false},
+		{"listed via trailing-comment line", map[string]string{"HEAD_REPO": "bob/beads", "HEAD_OWNER_ID": "1002", "PR_AUTHOR_ID": "1002", "SENDER_ID": "1002"}, true},
+		{"another listed user pushes to a listed author's PR", map[string]string{"SENDER": "bob", "SENDER_ID": "1002"}, true},
+		{"login is display only: listed ids, unlisted logins", map[string]string{"PR_AUTHOR": "mallory", "SENDER": "mallory"}, true},
+		// F5: a listed login re-registered by someone else has a new id.
+		{"renamed login re-registered (author)", map[string]string{"PR_AUTHOR": "alice", "PR_AUTHOR_ID": "666", "HEAD_OWNER_ID": "666"}, false},
+		{"renamed login re-registered (sender)", map[string]string{"SENDER": "alice", "SENDER_ID": "666"}, false},
+		{"author not listed", map[string]string{"PR_AUTHOR_ID": "666", "HEAD_OWNER_ID": "666"}, false},
+		{"collaborator pushes to a listed author's fork", map[string]string{"SENDER": "mallory", "SENDER_ID": "666"}, false},
+		{"listed pusher on an unlisted author's PR", map[string]string{"PR_AUTHOR_ID": "666", "HEAD_OWNER_ID": "666", "SENDER_ID": "1001"}, false},
+		{"id only in a comment", map[string]string{"SENDER_ID": "1003"}, false},
+		{"id prefix", map[string]string{"SENDER_ID": "100"}, false},
+		{"id suffix", map[string]string{"SENDER_ID": "10011"}, false},
+		{"id with leading zero", map[string]string{"SENDER_ID": "01001"}, false},
+		{"id with newline", map[string]string{"SENDER_ID": "1001\n1002"}, false},
+		{"empty sender id", map[string]string{"SENDER_ID": ""}, false},
+		{"empty author id", map[string]string{"PR_AUTHOR_ID": ""}, false},
+		{"bot sender login is not printed", map[string]string{"SENDER": "dependabot[bot]", "SENDER_ID": "49699333"}, false},
+		{"login with shell metacharacters", map[string]string{"SENDER": "alice;id", "SENDER_ID": "666"}, false},
 		{"same-repo PR", map[string]string{"HEAD_REPO": "gastownhall/beads"}, false},
 		{"same-repo PR, other case", map[string]string{"HEAD_REPO": "GastownHall/Beads"}, false},
 		{"no head repo (deleted fork)", map[string]string{"HEAD_REPO": ""}, false},
 		{"other base repo", map[string]string{"BASE_REPO": "someone/beads"}, false},
+		{"base repo prefix", map[string]string{"BASE_REPO": "gastownhall/beads-evil"}, false},
 		{"not the default branch", map[string]string{"BASE_REF": "release/1.0"}, false},
 		{"pull_request event", map[string]string{"EVENT_NAME": "pull_request"}, false},
+		{"reopened", map[string]string{"ACTION": "reopened"}, false},
+		{"ready_for_review", map[string]string{"ACTION": "ready_for_review"}, false},
 		{"labeled", map[string]string{"ACTION": "labeled"}, false},
 		{"edited", map[string]string{"ACTION": "edited"}, false},
+		{"unanchored action", map[string]string{"ACTION": "xopenedx"}, false},
+		// F4: the head must be the author's own fork.
+		{"cross-fork: head in someone else's fork", map[string]string{"HEAD_REPO": "mallory/beads", "HEAD_OWNER_ID": "666"}, false},
+		{"cross-fork: head in another listed user's fork", map[string]string{"HEAD_REPO": "bob/beads", "HEAD_OWNER_ID": "1002"}, false},
+		{"head owner id missing", map[string]string{"HEAD_OWNER_ID": ""}, false},
+		{"owner and author ids missing", map[string]string{"HEAD_OWNER_ID": "", "PR_AUTHOR_ID": ""}, false},
+		{"owner id not numeric", map[string]string{"HEAD_OWNER_ID": "1001x", "PR_AUTHOR_ID": "1001x"}, false},
 		{"short sha", map[string]string{"HEAD_SHA": "abcdef1"}, false},
 		{"uppercase sha", map[string]string{"HEAD_SHA": strings.Repeat("AB", 20)}, false},
 		{"ref instead of sha", map[string]string{"HEAD_SHA": "refs/heads/main"}, false},
@@ -451,14 +483,7 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			env := map[string]string{}
-			for k, v := range base {
-				env[k] = v
-			}
-			for k, v := range c.change {
-				env[k] = v
-			}
-			out, logs, err := run(t, env)
+			out, logs, err := run(t, with(c.change))
 			if err != nil {
 				t.Fatalf("script failed: %v\n%s", err, logs)
 			}
@@ -470,23 +495,30 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 			}
 		})
 	}
-	t.Run("missing allowlist fails", func(t *testing.T) {
-		env := map[string]string{}
-		for k, v := range base {
-			env[k] = v
-		}
-		env["ALLOWLIST"] = filepath.Join(dir, "missing.txt")
-		if out, logs, err := run(t, env); err == nil || strings.Contains(out, "allowed=true") {
-			t.Errorf("want failure without allowed=true; out=%q\n%s", out, logs)
-		}
-	})
-	t.Run("real allowlist admits a listed author", func(t *testing.T) {
-		env := map[string]string{}
-		for k, v := range base {
-			env[k] = v
-		}
-		env["ALLOWLIST"] = filepath.Join(sourceRepoRoot(t), bazelFarmAllowlist)
-		env["PR_AUTHOR"], env["SENDER"] = "sjarmak", "csells"
+	for name, content := range map[string]string{
+		"missing":     "",
+		"login entry": "1001 # alice\nmallory\n",
+		"signed id":   "+1001\n",
+	} {
+		t.Run("broken allowlist fails: "+name, func(t *testing.T) {
+			env := with(nil)
+			env["ALLOWLIST"] = filepath.Join(t.TempDir(), "missing.txt")
+			if content != "" {
+				if err := os.WriteFile(env["ALLOWLIST"], []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out, logs, err := run(t, env); err == nil || strings.Contains(out, "allowed=true") {
+				t.Errorf("want failure without allowed=true; out=%q\n%s", out, logs)
+			}
+		})
+	}
+	t.Run("real allowlist admits listed users", func(t *testing.T) {
+		env := with(map[string]string{
+			"ALLOWLIST":     filepath.Join(sourceRepoRoot(t), bazelFarmAllowlist),
+			"HEAD_REPO":     "sjarmak/beads",
+			"HEAD_OWNER_ID": "36544495", "PR_AUTHOR_ID": "36544495", "SENDER_ID": "2568253",
+		})
 		if out, logs, err := run(t, env); err != nil || out != "allowed=true\n" {
 			t.Errorf("out=%q err=%v\n%s", out, err, logs)
 		}

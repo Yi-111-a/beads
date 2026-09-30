@@ -17,13 +17,18 @@
 #     whose owner could push between the author's review and "Create";
 #   BASE_REF is DEFAULT_BRANCH;
 #   HEAD_SHA is a full 40-hex commit id (what bazel.yml checks out);
-#   PR_AUTHOR and SENDER are both on ALLOWLIST (case-insensitive). SENDER is
-#     who triggered this event: the pusher on synchronize, so a collaborator
-#     on a listed author's fork cannot push code that runs with secrets.
+#   PR_AUTHOR_ID and SENDER_ID (numeric user ids) are both on ALLOWLIST.
+#     SENDER is who triggered this event: the pusher on synchronize, so a
+#     collaborator on a listed author's fork cannot push code that runs with
+#     secrets. Ids, not logins: a renamed account's old login can be
+#     registered by anyone. Logins (PR_AUTHOR, SENDER) are for the log only.
+#
+# ALLOWLIST: one numeric user id per line; # starts a comment (the login,
+# for humans). Any other entry is a broken allowlist and fails the job.
 #
 # Inputs (environment): ALLOWLIST (file path), EVENT_NAME, ACTION,
 # REPOSITORY, BASE_REPO, HEAD_REPO, HEAD_OWNER_ID, BASE_REF, DEFAULT_BRANCH,
-# HEAD_SHA, PR_AUTHOR, PR_AUTHOR_ID, SENDER, GITHUB_OUTPUT;
+# HEAD_SHA, PR_AUTHOR, PR_AUTHOR_ID, SENDER, SENDER_ID, GITHUB_OUTPUT;
 # GITHUB_STEP_SUMMARY optional.
 
 set -euo pipefail
@@ -48,18 +53,31 @@ login() {
     fi
 }
 
+# A numeric GitHub user id; anything else is not one.
+is_id() {
+    [[ "${1:-}" =~ ^[1-9][0-9]{0,19}$ ]]
+}
+
+ids=()
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line//[[:space:]]/}"
+    [[ -n "$line" ]] || continue
+    if ! is_id "$line"; then
+        echo "::error::allowlist $allowlist has an entry that is not a numeric user id" >&2
+        exit 1
+    fi
+    ids+=("$line")
+done < "$allowlist"
+
 listed() {
-    local want line
-    want="$(login "${1:-}")"
-    [[ -n "$want" ]] || return 1
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%#*}"
-        line="${line//[[:space:]]/}"
-        [[ -n "$line" ]] || continue
-        if [[ "$(login "$line")" == "$want" ]]; then
+    local want="${1:-}" id
+    is_id "$want" || return 1
+    for id in "${ids[@]}"; do
+        if [[ "$id" == "$want" ]]; then
             return 0
         fi
-    done < "$allowlist"
+    done
     return 1
 }
 
@@ -75,15 +93,15 @@ elif [[ -z "${REPOSITORY:-}" || "${BASE_REPO:-}" != "$REPOSITORY" ]]; then
     decide "PR base repository is not this repository"
 elif [[ -z "${HEAD_REPO:-}" || "${HEAD_REPO,,}" == "${REPOSITORY,,}" ]]; then
     decide "PR head is not a fork (same-repo PRs use pr.yml's remote run)"
-elif ! [[ "${HEAD_OWNER_ID:-}" =~ ^[1-9][0-9]{0,19}$ && "${HEAD_OWNER_ID}" == "${PR_AUTHOR_ID:-}" ]]; then
+elif ! is_id "${HEAD_OWNER_ID:-}" || [[ "${HEAD_OWNER_ID}" != "${PR_AUTHOR_ID:-}" ]]; then
     decide "PR head is not the author's own fork"
 elif [[ -z "${DEFAULT_BRANCH:-}" || "${BASE_REF:-}" != "$DEFAULT_BRANCH" ]]; then
     decide "PR does not target the default branch"
 elif ! [[ "${HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
     decide "head SHA is not a full commit id"
-elif ! listed "$author"; then
+elif ! listed "${PR_AUTHOR_ID:-}"; then
     decide "PR author is not on the allowlist"
-elif ! listed "$sender"; then
+elif ! listed "${SENDER_ID:-}"; then
     decide "the user who triggered this run is not on the allowlist"
 fi
 

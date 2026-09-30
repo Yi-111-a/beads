@@ -117,7 +117,7 @@ may bypass it. There is no merge queue, so the checks run on
 Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them in mode
 `local` (no remote-only lanes, slower). `bazel-farm.yml` gives the
 remote-execution farm to fork PRs from an allowlist of trusted authors
-(`.github/bazel-farm-allowlist.txt`: the same four logins as gascity's
+(`.github/bazel-farm-allowlist.txt`: numeric user ids of the same four people as gascity's
 `.github/blacksmith-allowlist.txt`). Everyone else's fork PRs are unchanged.
 
 ### Design
@@ -143,9 +143,11 @@ remote-execution farm to fork PRs from an allowlist of trusted authors
     comes from the author's own fork;
   - the base ref is the default branch;
   - the head SHA is a full 40-hex id;
-  - both `pull_request.user.login` (the author) and `sender.login` (who
-    triggered the event: the opener, or the pusher on `synchronize`) are on
-    the list, case-insensitively.
+  - both `pull_request.user.id` (the author) and `sender.id` (who triggered
+    the event: the opener, or the pusher on `synchronize`) are on the list.
+    The list holds numeric user ids, with logins only as comments. A
+    renamed account's old login can be registered by anyone, but an id
+    never changes hands. Look one up with `gh api users/<login> --jq .id`.
 - `farm` job: calls `bazel.yml` only when `authorize` allowed it, with
   `contents: read`, exactly the four RBE secrets, `checkout-sha` =
   `github.event.pull_request.head.sha`, `fork-farm: authorized`, and
@@ -218,7 +220,7 @@ What a listed author's fork PR can do: what a same-repo PR can do. Its code
 (`setup-bazel`, `.bazelrc`, repository rules, tests) runs with the RBE
 certificate, so it can use or copy the certificate and write to the farm's
 cache. Maintainers accepted this risk for same-repo PRs on 2026-09-28 (see
-`bazel.yml`'s header). Listing a login extends that trust to the account,
+`bazel.yml`'s header). Listing a user extends that trust to the account,
 and an account compromise has the same effect as a compromised same-repo
 contributor.
 
