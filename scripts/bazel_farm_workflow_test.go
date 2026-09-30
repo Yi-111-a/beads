@@ -497,3 +497,122 @@ func mustReadWorkflowDir(t *testing.T) []string {
 	}
 	return names
 }
+
+// F3: what a farm run's (pull_request_target) PR code could write to a cache
+// must not change what later trusted runs execute.
+//
+// GitHub gives untrusted triggers a read-only cache token, and a declared
+// cache-mode would override that default: bazel-farm.yml, bazel.yml and
+// setup-bazel may declare none but read or none.
+func TestBazelFarmCacheModeStaysReadOnly(t *testing.T) {
+	for _, rel := range []string{
+		filepath.Join(".github", "workflows", bazelFarmWorkflowName),
+		filepath.Join(".github", "workflows", bazelWorkflowName),
+		filepath.Join(setupBazelActionDir, "action.yml"),
+	} {
+		root := readYAMLNode(t, rel)
+		var check func(node *yaml.Node, path string)
+		check = func(node *yaml.Node, path string) {
+			switch node.Kind {
+			case yaml.MappingNode:
+				for i := 0; i+1 < len(node.Content); i += 2 {
+					k, v := node.Content[i].Value, node.Content[i+1]
+					if k == "cache-mode" && (v.Kind != yaml.ScalarNode || (v.Value != "read" && v.Value != "none")) {
+						t.Errorf("%s: %s.cache-mode = %q; only read or none (a pull_request_target run must not write caches trusted runs restore)", rel, path, v.Value)
+					}
+					check(v, path+"."+k)
+				}
+			case yaml.SequenceNode:
+				for i, item := range node.Content {
+					check(item, fmt.Sprintf("%s[%d]", path, i))
+				}
+			}
+		}
+		check(root, "")
+	}
+}
+
+// bazel.yml's token: exactly contents: read, at the top and on any job that
+// declares permissions (a call cannot exceed its caller's, but pin it).
+func TestBazelWorkflowPermissionsReadOnly(t *testing.T) {
+	var doc struct {
+		Permissions any `yaml:"permissions"`
+	}
+	if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+bazelWorkflowName)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	readOnly := map[string]any{"contents": "read"}
+	if !reflect.DeepEqual(doc.Permissions, readOnly) {
+		t.Errorf("%s permissions = %v, want exactly %v", bazelWorkflowName, doc.Permissions, readOnly)
+	}
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		if job.Permissions != nil && !reflect.DeepEqual(job.Permissions, readOnly) {
+			t.Errorf("%s job %s permissions = %v, want none or exactly %v", bazelWorkflowName, name, job.Permissions, readOnly)
+		}
+	}
+}
+
+// Nothing restored from the runner cache is executed unverified: the Bazel
+// binary is downloaded fresh into a Bazelisk home outside the cache and
+// checked against a sha256 pinned for .bazelversion, the repo contents cache
+// (unverified extracted repos) is off, and restored Go modules are checked
+// against go.sum before use.
+func TestBazelRestoredCachesAreVerified(t *testing.T) {
+	version := strings.TrimSpace(readPolicyFile(t, sourceRepoRoot(t), ".bazelversion"))
+	var install, wrapper ciWorkflowStep
+	for _, step := range readSetupBazelAction(t).Runs.Steps {
+		switch step.Name {
+		case "Install Bazelisk":
+			install = step
+		case "Install bazel wrapper":
+			wrapper = step
+		}
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		pin := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(version+"/"+arch) + `\) bazel_sha=[0-9a-f]{64} ;;$`)
+		if !pin.MatchString(install.Run) {
+			t.Errorf("setup-bazel pins no sha256 for Bazel %s (.bazelversion) on %s", version, arch)
+		}
+	}
+	for _, want := range []string{
+		`echo "BAZELISK_HOME=$RUNNER_TEMP/bazelisk-home"`,
+		`echo "BAZELISK_VERIFY_SHA256=$bazel_sha"`,
+		`echo "BAZEL_CI_BAZEL_SHA256=$bazel_sha"`,
+		`bazel_version="$(tr -d '[:space:]' < .bazelversion)"`,
+	} {
+		if !strings.Contains(install.Run, want) {
+			t.Errorf("setup-bazel Install Bazelisk lacks %q", want)
+		}
+	}
+	if strings.Contains(install.Run, "bazel-ci-cache") {
+		t.Errorf("setup-bazel puts Bazelisk's home in the runner cache; the Bazel binary must never be restored from it")
+	}
+	for _, want := range []string{
+		"/usr/local/bin/bazelisk --version",
+		`echo "${BAZEL_CI_BAZEL_SHA256}  $bin" | sha256sum -c -`,
+		`find "$BAZELISK_HOME/downloads" -type f -path '*/bin/bazel' -print0`,
+		`if [ "$n" -eq 0 ]; then`,
+	} {
+		if !strings.Contains(wrapper.Run, want) {
+			t.Errorf("setup-bazel Install bazel wrapper lacks %q", want)
+		}
+	}
+	if strings.Index(wrapper.Run, "/usr/local/bin/bazelisk --version") > strings.Index(wrapper.Run, "sha256sum -c") {
+		t.Errorf("setup-bazel verifies the Bazel binary before downloading it")
+	}
+
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName)
+	restore := job.stepIndex(t, "Restore Go module cache")
+	verify := job.stepIndex(t, "Verify restored Go modules")
+	if verify != restore+1 || strings.TrimSpace(job.Steps[verify].Run) != "go mod verify" || job.Steps[verify].If != "" {
+		t.Errorf("%s: want an unconditional `go mod verify` step right after the Go module cache restore", bazelJobName)
+	}
+	for name, j := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		for i, step := range j.Steps {
+			if actionFamily(step.Uses) == cacheRestoreActionFamily && strings.Contains(step.With["path"], "go/pkg/mod") &&
+				(i+1 >= len(j.Steps) || strings.TrimSpace(j.Steps[i+1].Run) != "go mod verify") {
+				t.Errorf("%s job %s restores the Go module cache without verifying it next", bazelWorkflowName, name)
+			}
+		}
+	}
+}

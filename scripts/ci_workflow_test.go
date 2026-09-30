@@ -1482,7 +1482,7 @@ const (
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	checkoutSHA         = "3d3c42e5aac5ba805825da76410c181273ba90b1"
-	bazelCacheKeyPrefix = "bazel-repo-v2-${{ runner.os }}-"
+	bazelCacheKeyPrefix = "bazel-repo-v3-${{ runner.os }}-"
 	bazelCacheKey       = bazelCacheKeyPrefix + "${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}"
 	bazelCachePath      = "${{ runner.temp }}/bazel-ci-cache"
 	// Save only from a push to main that missed the exact key: the content is
@@ -3732,6 +3732,11 @@ func TestSetupBazelRCWriter(t *testing.T) {
 		}
 		if !strings.Contains(rc, "--repository_cache=") || strings.Contains(rc, "--disk_cache=") {
 			t.Errorf("local rc = %q; want --repository_cache and no --disk_cache (local runs never save it)", rc)
+		}
+		// The repo contents cache (extracted repos, never re-verified) would
+		// live in the runner cache: off.
+		if !strings.Contains(rc, "\ncommon --repo_contents_cache=\n") {
+			t.Errorf("rc = %q; want common --repo_contents_cache= (disabled)", rc)
 		}
 	})
 	for name, env := range map[string][]string{

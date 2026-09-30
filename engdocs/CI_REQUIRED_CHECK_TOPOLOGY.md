@@ -211,19 +211,51 @@ certificate, so it can use or copy the certificate and write to the farm's
 cache. Maintainers accepted this risk for same-repo PRs on 2026-09-28 (see
 `bazel.yml`'s header). Listing a login extends that trust to the account,
 and an account compromise has the same effect as a compromised same-repo
-contributor. One capability goes beyond a same-repo PR, and it is accepted:
+contributor.
 
-- Actions cache scope: `pull_request_target` runs use the default branch's
-  cache scope. Same-repo PRs use `refs/pull/N/merge`. The workflow never
-  saves a cache (`bazel.yml` saves only on `push` to `main`), but PR code on
-  the runner can reach the runner's cache credentials and write entries
-  under `main`'s scope. Later `push` runs on `main` would restore those
-  entries (Go module cache, Bazel runner cache). Mitigations if this
-  becomes unacceptable:
-  - key `main`'s restores on content that PR code cannot pre-seed;
-  - have `main` verify restored content (for example `go mod verify`);
-  - run the farm lanes from a `workflow_run`-style split that never executes
-    PR code in the base scope.
+Caches, the one place a `pull_request_target` run differs from a same-repo
+PR. It runs in the default branch's cache scope, which `push` runs on
+`main` restore from. Same-repo PRs use `refs/pull/N/merge`.
+
+- GitHub's Actions cache: read-only. Since 2026-06-26 GitHub gives
+  untrusted triggers, `pull_request_target` included, a read-only cache
+  token for the default branch's scope, and the cache service enforces it.
+  `cache-mode` (2026-09-10) makes `read` the default for these events and
+  carries through reusable workflows. A declared `cache-mode: write` or
+  `write-only` would override that default, so a policy test allows only
+  `read` or `none` in `bazel-farm.yml`, `bazel.yml` and `setup-bazel`. The
+  farm's safety depends on that default and on nothing declaring otherwise.
+- Blacksmith's colocated cache: unknown. Farm lanes run on
+  `blacksmith-2vcpu-ubuntu-2404`, whose cache transparently backs
+  `actions/cache`, scoped by branch like GitHub's. Nothing documents whether
+  it honours the read-only token. The canary run in the rollout notes
+  (`~/beads-bazel-plan/vip-forks-design.md`) or an answer from Blacksmith
+  settles it. Record the answer here.
+- What a writable cache would reach, and what now stops it. The `bazel.yml`
+  lanes on `main` and on same-repo PRs, which fall back to `main`'s scope,
+  restore two caches:
+  - The Bazel runner cache (`bazel-repo-v3-*`, restore-keys prefix). It now
+    holds only the content-addressable `--repository_cache`, whose hits
+    Bazel re-hashes. The Bazel binary is not cached: `setup-bazel`
+    downloads it into a fresh Bazelisk home with `BAZELISK_VERIFY_SHA256`
+    and checks it against a sha256 pinned for `.bazelversion`. The repo
+    contents cache (extracted repos, never re-verified) is off
+    (`--repo_contents_cache=`).
+  - The Go module cache (`beads-go-mod-v2-*`). `bazel-test` runs
+    `go mod verify` right after restoring it.
+
+  Outside the farm's path, other workflows restore caches that a writable
+  default-branch scope would poison:
+  - `release.yml`'s `setup-go` default cache (GOMODCACHE and GOCACHE, with a
+    key predictable from `go.sum`, in a job that signs and attests
+    binaries);
+  - the `beads-go-build-v2-*` GOCACHE entries restored by `main.yml` and
+    `pr.yml`;
+  - the executables in `smoke-binaries-*`, `historical-dolt-*` and
+    `regression-baseline-*`.
+
+  GitHub's read-only default covers all of them. Hardening `release.yml`
+  with `cache: false` is tracked separately.
 
 What anyone else can do: nothing new.
 

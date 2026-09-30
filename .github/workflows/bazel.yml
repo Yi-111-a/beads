@@ -76,7 +76,8 @@
 # job's ci-build-artifacts.
 #
 # Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
-# 2 GB (Bazel's --repository_cache plus Bazelisk's Bazel download), written
+# 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
+# hit; never the Bazel binary or the repo contents cache), written
 # only by a push to main that missed it. No --disk_cache: remote runs use the
 # remote cache, and local runs would need about 7 GB more.
 #
@@ -314,6 +315,11 @@ jobs:
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
+      # Go does not re-hash extracted module directories on use; a restored
+      # cache written by an untrusted run is checked against go.sum first.
+      - name: Verify restored Go modules
+        run: go mod verify
+
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
@@ -474,7 +480,7 @@ jobs:
           retention-days: 7
 
       # Only a push to main that missed the exact key writes the runner cache.
-      # Its content (--repository_cache and Bazelisk's download, never the rc
+      # Its content (--repository_cache only, never the rc
       # or credentials) is fixed by .bazelversion and MODULE.bazel.lock, so one
       # entry per lock is enough and later pushes do not churn the quota.
       - name: Save Bazel runner cache
@@ -482,7 +488,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
-          key: bazel-repo-v2-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
+          key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
