@@ -202,6 +202,43 @@ func TestCountDefaultsToTheDurablePlaneAndNoBucketing(t *testing.T) {
 	}
 }
 
+// TestCountForwardsTheEphemeralPlaneParameter is the count twin of
+// TestListForwardsTheEphemeralPlaneParameter: each plane parameter, sent ALONE,
+// reaches the role as its own field and nothing else.
+//
+// TestCountForwardsEveryDocumentedParameter cannot see this. It sends both
+// parameters at once, so a handler that also mapped `include_ephemeral` onto
+// IncludeInfra records the same request there. Alone, that handler turns a
+// plane-only count into one that also drops templates and gates — the answer
+// `include_ephemeral` exists to avoid — and this is where it shows.
+func TestCountForwardsTheEphemeralPlaneParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  issueops.CountRequest
+	}{
+		{"absent leaves the durable count alone", "", issueops.CountRequest{}},
+		{"include_ephemeral is the plane bit alone", "?include_ephemeral=true", issueops.CountRequest{IncludeEphemeral: true}},
+		{"include_infra does not set the plane bit", "?include_infra=true", issueops.CountRequest{IncludeInfra: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &roleCounter{}
+			ts := newCountServer(t, counter)
+
+			if resp := ts.get(t, countPath+tc.query); resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			got := counter.countRequests()
+			if len(got) != 1 {
+				t.Fatalf("%d counts, want 1", len(got))
+			}
+			if !reflect.DeepEqual(got[0], tc.want) {
+				t.Errorf("request = %+v, want %+v", got[0], tc.want)
+			}
+		})
+	}
+}
+
 // TestCountGroupBySelectsTheRolesOtherMethod is the discriminator, asserted in
 // both directions on the ROLE rather than on the body.
 //
