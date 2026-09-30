@@ -117,8 +117,9 @@ may bypass it. There is no merge queue, so the checks run on
 Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them in mode
 `local` (no remote-only lanes, slower). `bazel-farm.yml` gives the
 remote-execution farm to fork PRs from an allowlist of trusted authors
-(`.github/bazel-farm-allowlist.txt`: numeric user ids of the same four people as gascity's
-`.github/blacksmith-allowlist.txt`). Everyone else's fork PRs are unchanged.
+(`.github/bazel-farm-allowlist.txt`: the numeric user ids of the same four
+people as gascity's `.github/blacksmith-allowlist.txt`). Everyone else's
+fork PRs are unchanged.
 
 ### Design
 
@@ -340,6 +341,48 @@ Attacks considered:
   same-repo PRs share it, and client uploads of local results are off
   (`--noremote_upload_local_results`). A beads-only RBE instance and
   farm-side denial of client action-cache writes are still open.
+
+### Re-runs, Adding and Removing a User
+
+A re-run of a farm run (whole run or failed jobs) replays the original
+event. It keeps the original `GITHUB_SHA` and payload, so:
+
+- It checks out the same pinned head SHA. A re-run never picks up a newer
+  push; only a new `opened` or `synchronize` event does.
+- It runs the original base commit's `bazel-farm.yml`, `bazel.yml`,
+  allowlist and authorize script. A user removed from the allowlist on
+  `main` still passes `authorize` when one of their old runs is re-run,
+  and that run gets the RBE secrets again.
+
+Only users with write access can re-run, so this is a small window, but
+removal has to close it.
+
+To add a user: add `<id> # <login>` to the allowlist (id from
+`gh api users/<login> --jq .id`) and update `bazelFarmUsers` in
+`scripts/bazel_farm_workflow_test.go` in the same PR. It takes effect when
+the PR merges.
+
+To remove a user:
+
+1. Merge a PR that deletes their line from the allowlist and from
+   `bazelFarmUsers`.
+2. Cancel their in-progress farm runs, and delete their earlier farm runs
+   so that nobody can re-run them:
+
+   ```bash
+   # Runs whose head repository (the author's own fork) belongs to <id>.
+   gh api --paginate repos/gastownhall/beads/actions/workflows/bazel-farm.yml/runs \
+     --jq '.workflow_runs[] | select(.head_repository.owner.id == <id>) | "\(.id) \(.status)"'
+   gh run cancel <run-id>   # in-progress runs
+   gh run delete <run-id>   # completed runs
+   ```
+3. If the removal is for cause (a compromised account, or suspected misuse
+   of the certificate), assume the RBE client certificate was copied:
+   - rotate `RBE_TLS_CERT` / `RBE_TLS_KEY`;
+   - have the farm revoke the old certificate;
+   - consider purging the farm's action cache for the beads instance.
+
+   Rotating also closes the re-run window without step 2.
 
 Only a GitHub run can verify these:
 

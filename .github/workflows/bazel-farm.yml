@@ -43,6 +43,11 @@
 #   "PR" runs of pull_request events, and bazel.yml skips its sync-patch
 #   upload here.
 #
+# Re-runs replay the original event: the same pinned head SHA, and the
+# allowlist at the original base commit. De-listing a user therefore also
+# means cancelling/deleting their old farm runs, or rotating the RBE
+# certificate (engdoc: "Re-runs, Adding and Removing a User").
+#
 # Workflow edits take effect only once merged to the default branch.
 name: Bazel Farm (trusted forks)
 
