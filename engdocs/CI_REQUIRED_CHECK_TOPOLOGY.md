@@ -141,7 +141,12 @@ remote-execution farm to fork PRs from an allowlist of trusted authors
   `contents: read`, exactly the four RBE secrets, `checkout-sha` =
   `github.event.pull_request.head.sha`, `fork-farm: authorized`, and
   `integration: "off"`. `bazel.yml` checks out that SHA in every lane with
-  `persist-credentials: false`. Its `rbe` job runs a fork remotely only when
+  `persist-credentials: false`. actions/checkout v7 refuses to check out a
+  fork PR's head on `pull_request_target` unless `allow-unsafe-pr-checkout`
+  is true. Each lane sets that input to
+  `inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target'`,
+  so only the authorized farm call opts in (policy-tested: never a literal
+  `true`, and nowhere else). Its `rbe` job runs a fork remotely only when
   `inputs.fork-farm == 'authorized'`, the event is `pull_request_target`, and
   `checkout-sha` is set. An authorized farm run is `remote` or `skip` (farm
   switch off or secret missing), never `local`, because `pr.yml` already
@@ -287,7 +292,10 @@ Only a GitHub run can verify these:
 - The farm run's check runs appear on the PR.
 - The Blacksmith runner group accepts `pull_request_target` jobs for fork
   PRs.
-- `actions/checkout` fetches a fork's head SHA from the base repository.
+- `actions/checkout` fetches a fork's head SHA from the base repository, and
+  the `allow-unsafe-pr-checkout` opt-in gets past v7's fork-checkout guard
+  (the lanes fail with "Refusing to check out fork pull request code" if
+  it doesn't).
 - An unlisted author, or a push by an unlisted collaborator, skips `farm`.
 
 ## Required Check Contract

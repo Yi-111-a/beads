@@ -3594,6 +3594,11 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		if key || !rederive.MatchString(value) || strings.HasPrefix(path, ".jobs."+bazelRBEJobName+".steps[0].env.") {
 			return
 		}
+		// The checkout opt-in for fork code (TestBazelWorkflowForkFarmInputs
+		// pins it): a checkout input, not an execution-mode decision.
+		if value == bazelAllowUnsafeCheckout && strings.HasSuffix(path, ".with.allow-unsafe-pr-checkout") {
+			return
+		}
 		t.Errorf("%s: %s re-derives the execution mode (%q); read needs.rbe.outputs instead", bazelWorkflowName, path, value)
 	})
 

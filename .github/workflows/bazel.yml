@@ -289,10 +289,13 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       # Go is for tools/bazel/equivalence.py's `go list` and for make; Bazel
       # uses its own hermetic SDK.
@@ -511,10 +514,13 @@ jobs:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       # Only for go_js_wasm_exec and wasm_exec_node.js, which must match the
       # Go version Bazel compiles with (go.mod's; policy-tested).
@@ -654,10 +660,13 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -737,10 +746,13 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -815,10 +827,13 @@ jobs:
       BAZEL_DOLT_LANE: ${{ inputs.dolt-lane || 'doltserver' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -890,10 +905,13 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -968,10 +986,13 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel

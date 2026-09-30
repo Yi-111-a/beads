@@ -31,6 +31,10 @@ const (
 	// Every bazel.yml checkout: the caller's pinned SHA (empty: the event's
 	// default ref) and no token in .git/config.
 	bazelCheckoutRef = "${{ inputs.checkout-sha }}"
+	// actions/checkout v7 refuses a fork PR head on pull_request_target
+	// unless allow-unsafe-pr-checkout is true. Only the authorized farm call
+	// may opt in; every other run evaluates this to false.
+	bazelAllowUnsafeCheckout = "${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}"
 )
 
 // The logins on the allowlist, the same as gascity's
@@ -222,7 +226,7 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 				continue
 			}
 			checkouts++
-			want := map[string]string{"ref": bazelCheckoutRef, "persist-credentials": "false"}
+			want := map[string]string{"ref": bazelCheckoutRef, "persist-credentials": "false", "allow-unsafe-pr-checkout": bazelAllowUnsafeCheckout}
 			if !reflect.DeepEqual(step.With, want) {
 				t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
 			}
@@ -257,6 +261,24 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 	}
 	if want := "${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}"; conc.Concurrency.CancelInProgress != want {
 		t.Errorf("%s cancel-in-progress = %q, want %q", bazelWorkflowName, conc.Concurrency.CancelInProgress, want)
+	}
+
+	// allow-unsafe-pr-checkout: nowhere but bazel.yml's lane checkouts, and
+	// there only as the gated expression (never a literal true).
+	optIns := 0
+	for _, entry := range mustReadWorkflowDir(t) {
+		walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", entry)), "", func(path string, key bool, value string) {
+			if !key || value != "allow-unsafe-pr-checkout" {
+				return
+			}
+			optIns++
+			if entry != bazelWorkflowName || !strings.HasSuffix(path, ".with.allow-unsafe-pr-checkout") {
+				t.Errorf("%s: %s opts into checking out fork PR code; only bazel.yml's lane checkouts may", entry, path)
+			}
+		})
+	}
+	if optIns != checkouts {
+		t.Errorf("%d allow-unsafe-pr-checkout keys, want one per bazel.yml lane checkout (%d)", optIns, checkouts)
 	}
 
 	// Only bazel-farm.yml passes the farm inputs (pr.yml's call is pinned by
@@ -459,4 +481,19 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 			t.Errorf("out=%q err=%v\n%s", out, err, logs)
 		}
 	})
+}
+
+func mustReadWorkflowDir(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(sourceRepoRoot(t), ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".yml") || strings.HasSuffix(entry.Name(), ".yaml") {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
 }
