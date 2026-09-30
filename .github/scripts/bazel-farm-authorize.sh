@@ -7,9 +7,14 @@
 # log and step summary. Exits non-zero only on a broken invocation.
 #
 # Allowed only when all hold:
-#   EVENT_NAME is pull_request_target and ACTION is opened, synchronize,
-#     reopened or ready_for_review;
+#   EVENT_NAME is pull_request_target and ACTION is opened or synchronize
+#     (reopened and ready_for_review would re-test a head no listed user
+#     necessarily pushed: a fork collaborator's push while the PR was closed
+#     or a draft);
 #   BASE_REPO is REPOSITORY and HEAD_REPO is another repository (a fork);
+#   HEAD_OWNER_ID (the head repository owner's numeric id) is PR_AUTHOR_ID:
+#     the PR comes from the author's own fork, not from a third party's fork
+#     whose owner could push between the author's review and "Create";
 #   BASE_REF is DEFAULT_BRANCH;
 #   HEAD_SHA is a full 40-hex commit id (what bazel.yml checks out);
 #   PR_AUTHOR and SENDER are both on ALLOWLIST (case-insensitive). SENDER is
@@ -17,8 +22,9 @@
 #     on a listed author's fork cannot push code that runs with secrets.
 #
 # Inputs (environment): ALLOWLIST (file path), EVENT_NAME, ACTION,
-# REPOSITORY, BASE_REPO, HEAD_REPO, BASE_REF, DEFAULT_BRANCH, HEAD_SHA,
-# PR_AUTHOR, SENDER, GITHUB_OUTPUT; GITHUB_STEP_SUMMARY optional.
+# REPOSITORY, BASE_REPO, HEAD_REPO, HEAD_OWNER_ID, BASE_REF, DEFAULT_BRANCH,
+# HEAD_SHA, PR_AUTHOR, PR_AUTHOR_ID, SENDER, GITHUB_OUTPUT;
+# GITHUB_STEP_SUMMARY optional.
 
 set -euo pipefail
 
@@ -63,12 +69,14 @@ author="${PR_AUTHOR:-}"
 sender="${SENDER:-}"
 if [[ "${EVENT_NAME:-}" != pull_request_target ]]; then
     decide "event is not pull_request_target"
-elif ! [[ "${ACTION:-}" =~ ^(opened|synchronize|reopened|ready_for_review)$ ]]; then
-    decide "action is not opened, synchronize, reopened or ready_for_review"
+elif ! [[ "${ACTION:-}" =~ ^(opened|synchronize)$ ]]; then
+    decide "action is not opened or synchronize"
 elif [[ -z "${REPOSITORY:-}" || "${BASE_REPO:-}" != "$REPOSITORY" ]]; then
     decide "PR base repository is not this repository"
 elif [[ -z "${HEAD_REPO:-}" || "${HEAD_REPO,,}" == "${REPOSITORY,,}" ]]; then
     decide "PR head is not a fork (same-repo PRs use pr.yml's remote run)"
+elif ! [[ "${HEAD_OWNER_ID:-}" =~ ^[1-9][0-9]{0,19}$ && "${HEAD_OWNER_ID}" == "${PR_AUTHOR_ID:-}" ]]; then
+    decide "PR head is not the author's own fork"
 elif [[ -z "${DEFAULT_BRANCH:-}" || "${BASE_REF:-}" != "$DEFAULT_BRANCH" ]]; then
     decide "PR does not target the default branch"
 elif ! [[ "${HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then

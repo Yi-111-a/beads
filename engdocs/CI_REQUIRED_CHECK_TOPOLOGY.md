@@ -122,8 +122,11 @@ remote-execution farm to fork PRs from an allowlist of trusted authors
 
 ### Design
 
-- Trigger: `pull_request_target`, types `opened`, `synchronize`, `reopened`,
-  `ready_for_review`, base branch `main`. `pull_request_target` runs the
+- Trigger: `pull_request_target`, types `opened` and `synchronize`, base
+  branch `main`. There is no `reopened` or `ready_for_review`: those
+  re-test a head that no listed user necessarily pushed (see "Sender vs.
+  author" below). Drafts run on `opened` and `synchronize` anyway.
+  `pull_request_target` runs the
   workflow file from the base branch, and `uses: ./.github/workflows/bazel.yml`
   resolves from that same commit, so a PR cannot change either for its own
   run.
@@ -131,12 +134,18 @@ remote-execution farm to fork PRs from an allowlist of trusted authors
   allowlist and `.github/scripts/bazel-farm-authorize.sh` at `github.sha`
   (the base commit the workflow came from), without persisted credentials.
   Event facts reach the script through `env` only. It allows the run only
-  when the event is `pull_request_target` with one of the four actions, the
-  base repository is this one, the head repository is another (a fork), the
-  base ref is the default branch, the head SHA is a full 40-hex id, and both
-  `pull_request.user.login` (the author) and `sender.login` (who triggered
-  the event: the opener, the pusher on `synchronize`, the reopener) are on
-  the list, case-insensitively.
+  when all of these hold:
+  - the event is `pull_request_target` with action `opened` or
+    `synchronize`;
+  - the base repository is this one and the head repository is another (a
+    fork);
+  - the head repository's owner is the PR author (numeric ids), so the PR
+    comes from the author's own fork;
+  - the base ref is the default branch;
+  - the head SHA is a full 40-hex id;
+  - both `pull_request.user.login` (the author) and `sender.login` (who
+    triggered the event: the opener, or the pusher on `synchronize`) are on
+    the list, case-insensitively.
 - `farm` job: calls `bazel.yml` only when `authorize` allowed it, with
   `contents: read`, exactly the four RBE secrets, `checkout-sha` =
   `github.event.pull_request.head.sha`, `fork-farm: authorized`, and
@@ -282,6 +291,17 @@ Attacks considered:
     `sender = collaborator`, and nothing runs.
   - Someone who opens a PR from a listed author's fork branch gets
     `author = opener`, and nothing runs.
+  - A listed author who opens a PR from someone else's fork (compare
+    across forks) gets nothing: the head repository's owner must be the
+    author. Otherwise the fork's owner could push between the author's
+    review and "Create".
+  - A collaborator on a listed author's fork who pushes while the PR is
+    closed or a draft (skipped: `sender = collaborator`) cannot get that
+    head run by the author's click on "Reopen" or "Ready for review",
+    because those actions are not triggers.
+  - What remains is the listed author's responsibility: a PR opened, or a
+    push made, by the author on top of commits a fork collaborator pushed.
+    Listed authors should not add collaborators to their fork.
   - A listed author who pushes to an unlisted author's PR also gets nothing
     (the author check).
   - An upstream maintainer who pushes to the PR, or clicks "Update branch",

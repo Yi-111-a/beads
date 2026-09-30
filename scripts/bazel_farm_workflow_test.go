@@ -72,8 +72,8 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 		t.Errorf("triggers = %v, want exactly [pull_request_target]", got)
 	}
 	prt := doc.On["pull_request_target"]
-	if want := []string{"opened", "synchronize", "reopened", "ready_for_review"}; !reflect.DeepEqual(prt.Types, want) {
-		t.Errorf("pull_request_target types = %v, want %v (no labeled/edited/comment-driven runs)", prt.Types, want)
+	if want := []string{"opened", "synchronize"}; !reflect.DeepEqual(prt.Types, want) {
+		t.Errorf("pull_request_target types = %v, want %v (no reopened/ready_for_review: they re-test a head no listed user necessarily pushed; no labeled/edited/comment-driven runs)", prt.Types, want)
 	}
 	if !reflect.DeepEqual(prt.Branches, []string{"main"}) {
 		t.Errorf("pull_request_target branches = %v, want [main]", prt.Branches)
@@ -167,10 +167,12 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 		"REPOSITORY":     "${{ github.repository }}",
 		"BASE_REPO":      "${{ github.event.pull_request.base.repo.full_name }}",
 		"HEAD_REPO":      "${{ github.event.pull_request.head.repo.full_name }}",
+		"HEAD_OWNER_ID":  "${{ github.event.pull_request.head.repo.owner.id }}",
 		"BASE_REF":       "${{ github.event.pull_request.base.ref }}",
 		"DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
 		"HEAD_SHA":       "${{ github.event.pull_request.head.sha }}",
 		"PR_AUTHOR":      "${{ github.event.pull_request.user.login }}",
+		"PR_AUTHOR_ID":   "${{ github.event.pull_request.user.id }}",
 		"SENDER":         "${{ github.event.sender.login }}",
 	}
 	if decide.ID != "decide" || decide.Uses != "" || decide.Run != "bash "+bazelFarmAuthorize || !reflect.DeepEqual(decide.Env, wantEnv) {
@@ -389,6 +391,8 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 		"REPOSITORY":     "gastownhall/beads",
 		"BASE_REPO":      "gastownhall/beads",
 		"HEAD_REPO":      "julianknutsen/beads",
+		"HEAD_OWNER_ID":  "8082291",
+		"PR_AUTHOR_ID":   "8082291",
 		"BASE_REF":       "main",
 		"DEFAULT_BRANCH": "main",
 		"HEAD_SHA":       strings.Repeat("ab", 20),
@@ -414,8 +418,14 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 	}{
 		{"listed author pushes", nil, true},
 		{"opened", map[string]string{"ACTION": "opened"}, true},
-		{"reopened", map[string]string{"ACTION": "reopened"}, true},
-		{"ready_for_review", map[string]string{"ACTION": "ready_for_review"}, true},
+		{"reopened", map[string]string{"ACTION": "reopened"}, false},
+		{"ready_for_review", map[string]string{"ACTION": "ready_for_review"}, false},
+		{"unanchored action", map[string]string{"ACTION": "xopenedx"}, false},
+		{"cross-fork: head in someone else's fork", map[string]string{"HEAD_REPO": "mallory/beads", "HEAD_OWNER_ID": "666"}, false},
+		{"head owner id missing", map[string]string{"HEAD_OWNER_ID": ""}, false},
+		{"author id missing", map[string]string{"HEAD_OWNER_ID": "", "PR_AUTHOR_ID": ""}, false},
+		{"owner id not numeric", map[string]string{"HEAD_OWNER_ID": "8082291x", "PR_AUTHOR_ID": "8082291x"}, false},
+		{"base repo prefix", map[string]string{"BASE_REPO": "gastownhall/beads-evil"}, false},
 		{"case-insensitive", map[string]string{"PR_AUTHOR": "JULIANKNUTSEN", "SENDER": "Quad341"}, true},
 		{"listed via trailing-comment line", map[string]string{"PR_AUTHOR": "quad341", "SENDER": "quad341"}, true},
 		{"author not listed", map[string]string{"PR_AUTHOR": "mallory"}, false},
