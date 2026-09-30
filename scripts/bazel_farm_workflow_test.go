@@ -423,7 +423,9 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 		t.Helper()
 		out := filepath.Join(t.TempDir(), "out")
 		cmd := exec.Command(bash, script)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_OUTPUT=" + out}
+		// en_US.UTF-8 (where installed), whose [0-9] and [A-Za-z] match
+		// non-ASCII: the script must pin its own locale.
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_OUTPUT=" + out, "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"}
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -488,6 +490,11 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 		{"uppercase sha", map[string]string{"HEAD_SHA": strings.Repeat("AB", 20)}, false},
 		{"ref instead of sha", map[string]string{"HEAD_SHA": "refs/heads/main"}, false},
 		{"sha with suffix", map[string]string{"HEAD_SHA": strings.Repeat("ab", 20) + "\nx"}, false},
+		// F8: non-ASCII digits and letters never pass the byte-class checks,
+		// whatever the runner's locale.
+		{"non-ASCII digit in id", map[string]string{"SENDER_ID": "100\u0661"}, false},
+		{"non-ASCII digit in owner id", map[string]string{"HEAD_OWNER_ID": "100\u0661", "PR_AUTHOR_ID": "100\u0661"}, false},
+		{"non-ASCII hex in sha", map[string]string{"HEAD_SHA": strings.Repeat("ab", 19) + "a\u00e9"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -521,6 +528,11 @@ func TestBazelFarmAuthorizeScript(t *testing.T) {
 			}
 		})
 	}
+	t.Run("pins the C locale", func(t *testing.T) {
+		if !regexp.MustCompile(`(?m)^export LC_ALL=C$`).MatchString(readPolicyFile(t, sourceRepoRoot(t), bazelFarmAuthorize)) {
+			t.Errorf("%s does not export LC_ALL=C", bazelFarmAuthorize)
+		}
+	})
 	t.Run("real allowlist admits listed users", func(t *testing.T) {
 		env := with(map[string]string{
 			"ALLOWLIST":     filepath.Join(sourceRepoRoot(t), bazelFarmAllowlist),

@@ -32,6 +32,9 @@
 # GITHUB_STEP_SUMMARY optional.
 
 set -euo pipefail
+# Byte semantics for the [A-Za-z0-9] / [0-9] classes and ${v,,}: in some
+# UTF-8 locales they match or fold non-ASCII (e.g. the Kelvin sign to k).
+export LC_ALL=C
 
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is not set}"
 allowlist="${ALLOWLIST:?ALLOWLIST is not set}"
