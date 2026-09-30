@@ -433,6 +433,7 @@ Do not require these existing check names directly:
 - `Resolve versions to test`
 - `nix build .#default`
 - `Bazel / test` and the other jobs of `bazel.yml`
+- `Bazel Farm / *` (`bazel-farm.yml`'s advisory, PR-controlled results)
 
 Those checks should remain visible for diagnosis, but branch protection should
 point at aggregate gates after the gate jobs are verified.

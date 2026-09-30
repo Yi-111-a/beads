@@ -195,6 +195,14 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 		t.Errorf("farm uses=%q needs=%v if=%q; want a call of ./.github/workflows/%s needing authorize, if allowed == 'true'",
 			farm.Uses, farm.Needs, farm.If, bazelWorkflowName)
 	}
+	// Check runs are "<job name> / <lane>": the farm's PR-controlled
+	// results must never share a name with pr.yml's Bazel call.
+	if farm.Name != "Bazel Farm" {
+		t.Errorf("farm job name = %q, want %q", farm.Name, "Bazel Farm")
+	}
+	if prName := readCIWorkflow(t, "pr.yml").job(t, "bazel").Name; strings.EqualFold(farm.Name, prName) || farm.Name == "" {
+		t.Errorf("farm job name %q collides with pr.yml's bazel job %q", farm.Name, prName)
+	}
 	gotSecrets := map[string]string{}
 	if m, ok := farm.Secrets.(map[string]any); ok {
 		for k, v := range m {

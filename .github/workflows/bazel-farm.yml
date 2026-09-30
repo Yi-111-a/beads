@@ -110,8 +110,11 @@ jobs:
           SENDER_ID: ${{ github.event.sender.id }}
         run: bash .github/scripts/bazel-farm-authorize.sh
 
+  # Not "Bazel": pr.yml's call is named that, and this run's lane results are
+  # PR-controlled, so its check names ("Bazel Farm / <lane>") must never
+  # collide with ones a ruleset might require.
   farm:
-    name: Bazel
+    name: Bazel Farm
     needs: authorize
     if: ${{ needs.authorize.outputs.allowed == 'true' }}
     permissions:
