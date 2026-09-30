@@ -178,11 +178,11 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 // TestCountDefaultsToTheDurablePlaneAndNoBucketing: an empty request is the
 // role's default answer and nothing else.
 //
-// The zero value of IncludeInfra is the whole plane story on this operation and
-// it is worth an assertion of its own: false means DURABLE ONLY — no wisps, no
-// `no_history` beads stored in that tier — and a handler that defaulted it on
-// would silently start counting ephemeral rows a scripted caller has never
-// counted.
+// The zero values of IncludeInfra and IncludeEphemeral are the whole plane story
+// on this operation and worth an assertion of their own: both false means
+// DURABLE ONLY — no wisps, no `no_history` beads stored in that tier — and a
+// handler that defaulted either on would silently start counting ephemeral rows
+// a scripted caller has never counted.
 func TestCountDefaultsToTheDurablePlaneAndNoBucketing(t *testing.T) {
 	counter := &roleCounter{}
 	ts := newCountServer(t, counter)
@@ -610,7 +610,7 @@ func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 // The other two are already mechanical: TestCountParametersMatchTheHandler ties
 // the parameter names to the DOCUMENT, and TestCountForwardsEveryDocumentedParameter
 // ties each parameter's VALUE to the field it lands in. Neither can see a role
-// field that no parameter reaches — a 26th filter added to CountRequest and left
+// field that no parameter reaches — a new filter added to CountRequest and left
 // unpublished turns nothing red, and the wire silently stops being able to ask
 // a question the role can answer. That is the failure this map closes, and it is
 // the one that matters for an HTTP-backed store: it is how the wire becomes
@@ -647,8 +647,8 @@ var countFieldForParameter = map[string]string{
 	"include_ephemeral": "IncludeEphemeral",
 }
 
-// TestEveryCountRequestFieldIsPublished: the role publishes 25 filters and the
-// wire publishes all 25. A field added to issueops.CountRequest fails here and
+// TestEveryCountRequestFieldIsPublished: the wire publishes every filter the
+// role declares. A field added to issueops.CountRequest fails here and
 // NAMES itself, so the choice is made deliberately — publish it, or record why
 // it is withheld — rather than by nobody noticing.
 //
