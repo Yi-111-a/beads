@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,10 @@ func TestManagedSectionWrapsBody(t *testing.T) {
 }
 
 func TestUpsertManagedSectionAppendsToUserContent(t *testing.T) {
-	got, replaced := UpsertManagedSection("# Mine\n\nkeep me\n", "beads body")
+	got, replaced, err := UpsertManagedSection("# Mine\n\nkeep me\n", "beads body")
+	if err != nil {
+		t.Fatalf("UpsertManagedSection: %v", err)
+	}
 	if replaced {
 		t.Fatalf("reported a replacement where there was no section")
 	}
@@ -37,8 +41,14 @@ func TestUpsertManagedSectionAppendsToUserContent(t *testing.T) {
 }
 
 func TestUpsertManagedSectionReplacesExistingSection(t *testing.T) {
-	first, _ := UpsertManagedSection("# Mine\n\nkeep me\n", "old body")
-	got, replaced := UpsertManagedSection(first, "new body")
+	first, _, err := UpsertManagedSection("# Mine\n\nkeep me\n", "old body")
+	if err != nil {
+		t.Fatalf("first UpsertManagedSection: %v", err)
+	}
+	got, replaced, err := UpsertManagedSection(first, "new body")
+	if err != nil {
+		t.Fatalf("UpsertManagedSection: %v", err)
+	}
 	if !replaced {
 		t.Fatalf("did not report replacing the existing section")
 	}
@@ -57,7 +67,10 @@ func TestUpsertManagedSectionReplacesExistingSection(t *testing.T) {
 }
 
 func TestUpsertManagedSectionEmptyFileGetsSectionOnly(t *testing.T) {
-	got, replaced := UpsertManagedSection("   \n", "body")
+	got, replaced, err := UpsertManagedSection("   \n", "body")
+	if err != nil {
+		t.Fatalf("UpsertManagedSection: %v", err)
+	}
 	if replaced {
 		t.Fatalf("reported a replacement on an empty file")
 	}
@@ -66,23 +79,140 @@ func TestUpsertManagedSectionEmptyFileGetsSectionOnly(t *testing.T) {
 	}
 }
 
-func TestUpsertManagedSectionUnbalancedMarkersAppend(t *testing.T) {
-	broken := "# Mine\n\n" + agentsBeginMarker + "\nno end marker here\n"
-	got, replaced := UpsertManagedSection(broken, "body")
-	if replaced {
-		t.Fatalf("reported a replacement on unbalanced markers")
+func TestUpsertManagedSectionUnbalancedMarkersRefuse(t *testing.T) {
+	broken := "# My rules\n\nSee " + agentsBeginMarker + " for the old note.\n\nKEEP-ME-1 user paragraph.\n"
+	if _, _, err := UpsertManagedSection(broken, "body"); !errors.Is(err, ErrUnbalancedSection) {
+		t.Fatalf("expected ErrUnbalancedSection for a stray BEGIN, got %v", err)
 	}
-	if !strings.HasPrefix(got, broken) {
-		t.Fatalf("unbalanced file was rewritten in place: %q", got)
-	}
-	if !strings.Contains(got, agentsEndMarker) {
-		t.Fatalf("no section was appended: %q", got)
+
+	// The other way round: an END with no BEGIN.
+	endOnly := "# Mine\n\n" + agentsEndMarker + "\n"
+	if _, _, err := UpsertManagedSection(endOnly, "body"); !errors.Is(err, ErrUnbalancedSection) {
+		t.Fatalf("expected ErrUnbalancedSection for a stray END, got %v", err)
 	}
 }
 
+// A file whose content a previous version of setup wrote as the whole file is
+// beads' own output, so the section replaces it rather than being appended to
+// it - otherwise the upgrade path duplicates the guidance and --remove leaves
+// the unmarked copy behind for good.
+func TestUpsertManagedSectionMigratesLegacyTemplate(t *testing.T) {
+	const template = "# GitHub Copilot Instructions\n\n## Core Workflow\n"
+	got, replaced, err := UpsertManagedSection(template+"\n", template)
+	if err != nil {
+		t.Fatalf("UpsertManagedSection: %v", err)
+	}
+	if !replaced {
+		t.Fatalf("legacy template should be reported as replaced in place")
+	}
+	if n := strings.Count(got, "# GitHub Copilot Instructions"); n != 1 {
+		t.Fatalf("expected the guidance once, got %d copies in %q", n, got)
+	}
+	if got != ManagedSection(template) {
+		t.Fatalf("legacy file did not become exactly the section: %q", got)
+	}
+
+	// Trailing whitespace must not decide the question.
+	if _, replaced, err := UpsertManagedSection(template, template); err != nil || !replaced {
+		t.Fatalf("exact legacy content not migrated: replaced=%v err=%v", replaced, err)
+	}
+
+	// After the migration --remove takes the whole file away, because nothing
+	// of the user's is left in it.
+	remaining, hasUser, err := RemoveManagedSection(got)
+	if err != nil {
+		t.Fatalf("RemoveManagedSection: %v", err)
+	}
+	if hasUser || strings.TrimSpace(remaining) != "" {
+		t.Fatalf("a migrated file reported user content: %q", remaining)
+	}
+
+	// Content that differs from the template is the user's and is preserved.
+	userFile := template + "\n## House rules\n\nAlways run make check.\n"
+	withUser, replaced, err := UpsertManagedSection(userFile, template)
+	if err != nil {
+		t.Fatalf("UpsertManagedSection: %v", err)
+	}
+	if replaced {
+		t.Fatalf("edited user file was treated as a legacy template")
+	}
+	if !strings.Contains(withUser, "Always run make check.") {
+		t.Fatalf("user content was lost: %q", withUser)
+	}
+}
+
+// An unbalanced marker must not let a later run or --remove span from the stray
+// BEGIN to a subsequent END and delete the user's text in between.
+func TestUnbalancedMarkersDoNotEatUserTextOnReRunOrRemove(t *testing.T) {
+	broken := "# My rules\n\nSee " + agentsBeginMarker + " for the old note.\n\nKEEP-ME-1 user paragraph.\n"
+
+	if _, err := InstallManagedSectionFileIn(t, broken, "body"); err == nil {
+		t.Fatalf("install accepted a file with a stray BEGIN marker")
+	}
+	after, err := RemoveManagedSectionFileIn(t, broken)
+	if err == nil {
+		t.Fatalf("remove accepted a file with a stray BEGIN marker")
+	}
+	if after != broken {
+		t.Fatalf("unbalanced file was rewritten: %q", after)
+	}
+}
+
+// install/remove against a real file, returning the file content afterwards.
+func InstallManagedSectionFileIn(t *testing.T, seed, body string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "copilot-instructions.md")
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if _, err := InstallManagedSectionFile(path, body); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	return string(data), nil
+}
+
+func RemoveManagedSectionFileIn(t *testing.T, seed string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "copilot-instructions.md")
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	remaining, hasUser, err := RemoveManagedSection(string(data))
+	if err != nil {
+		return string(data), err
+	}
+	if !hasUser {
+		return "", nil
+	}
+	if err := WriteManagedSectionFile(path, remaining); err != nil {
+		return string(data), err
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	return string(after), nil
+}
+
 func TestRemoveManagedSectionReportsLeftoverUserContent(t *testing.T) {
-	withUser, _ := UpsertManagedSection("# Mine\n\nkeep me\n", "body")
-	remaining, hasUser := RemoveManagedSection(withUser)
+	withUser, _, err := UpsertManagedSection("# Mine\n\nkeep me\n", "body")
+	if err != nil {
+		t.Fatalf("UpsertManagedSection: %v", err)
+	}
+	remaining, hasUser, err := RemoveManagedSection(withUser)
+	if err != nil {
+		t.Fatalf("RemoveManagedSection: %v", err)
+	}
 	if !hasUser {
 		t.Fatalf("user content should have been reported as remaining in %q", remaining)
 	}
@@ -94,7 +224,10 @@ func TestRemoveManagedSectionReportsLeftoverUserContent(t *testing.T) {
 	}
 
 	onlySection := ManagedSection("body")
-	remaining, hasUser = RemoveManagedSection(onlySection)
+	remaining, hasUser, err = RemoveManagedSection(onlySection)
+	if err != nil {
+		t.Fatalf("RemoveManagedSection: %v", err)
+	}
 	if hasUser {
 		t.Fatalf("a beads-only file reported user content: %q", remaining)
 	}

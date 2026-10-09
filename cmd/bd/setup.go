@@ -292,7 +292,10 @@ func runRecipe(name string) error {
 				if err != nil {
 					return HandleError("read %s: %v", path, err)
 				}
-				remaining, hasUserContent := setup.RemoveManagedSection(string(data))
+				remaining, hasUserContent, err := setup.RemoveManagedSection(string(data))
+				if err != nil {
+					return HandleError("%v", err)
+				}
 				if remaining == string(data) {
 					// No beads section: the file is entirely the user's.
 					continue
@@ -301,7 +304,7 @@ func runRecipe(name string) error {
 					if err := os.Remove(path); err != nil {
 						return HandleError("%v", err)
 					}
-				} else if err := os.WriteFile(path, []byte(remaining), 0o644); err != nil { // #nosec G306 -- config files need to be readable
+				} else if err := setup.WriteManagedSectionFile(path, remaining); err != nil { // #nosec G306 -- config files need to be readable
 					return HandleError("write file: %v", err)
 				}
 				removed = true

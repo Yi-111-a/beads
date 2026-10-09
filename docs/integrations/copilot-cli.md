@@ -80,6 +80,16 @@ replaces just the section, and `bd setup copilot --remove` strips the section
 without deleting your instructions. `--check` reports the file separately when
 it exists but carries no Beads section.
 
+Upgrading: a repository set up by an earlier version holds the unmarked
+template, which Beads wrote as the whole file. `bd setup copilot` recognises that
+content and migrates it to the marked section in place, so the guidance does not
+end up in the file twice and `--remove` does not leave the old copy behind.
+Instructions you added to that file are preserved as usual.
+
+If a file carries a `BEGIN` or `END` marker without its partner, `bd setup
+copilot` and `bd setup copilot --remove` stop with an error rather than guess
+which text belongs to the section. Fix or delete the stray marker and re-run.
+
 ## Related Files
 
 - `plugins/beads/.copilot-plugin/plugin.json` - Source plugin manifest for the shared plugin package
